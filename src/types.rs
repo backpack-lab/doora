@@ -36,6 +36,9 @@ pub enum AppError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
 
+    #[error("Directory walk error: {0}")]
+    WalkError(#[from] ignore::Error),
+
     #[error("Parse error: {0}")]
     ParseError(String),
 

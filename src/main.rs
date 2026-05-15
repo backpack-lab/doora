@@ -10,13 +10,13 @@ mod output;
 mod parser;
 mod query;
 mod types;
-mod walker;
+pub mod walker;
 
 use output::{print_match, print_summary};
 use parser::parse_file;
 use query::{compile_query, extract_matches};
-use types::{AppError, MatchResult};
-use walker::walk_rust_files;
+use types::{AppError, Language, MatchResult};
+use walker::build_walker;
 
 #[derive(Parser, Debug)]
 #[command(name = "ast-search", about = "Structural AST-based code search")]
@@ -53,17 +53,22 @@ fn main() {
 
     let started_at = Instant::now();
 
-    let (mut results, processed_files) = walk_rust_files(&cli.path)
+    let (mut results, processed_files) = build_walker(&cli.path, &Language::Rust)
         .par_bridge()
         .fold(
             || (Vec::<MatchResult>::new(), 0usize),
-            |mut acc, path| {
-                match parse_file(&path) {
-                    Ok((tree, source)) => {
-                        let matches = extract_matches(&tree, &source, query.as_ref(), &path);
-                        acc.0.extend(matches);
-                        acc.1 += 1;
-                    }
+            |mut acc, entry_result| {
+                match entry_result {
+                    Ok(entry) => match parse_file(entry.path()) {
+                        Ok((tree, source)) => {
+                            let matches = extract_matches(&tree, &source, query.as_ref(), entry.path());
+                            acc.0.extend(matches);
+                            acc.1 += 1;
+                        }
+                        Err(error) => {
+                            eprintln!("warning: {}", error);
+                        }
+                    },
                     Err(error) => {
                         eprintln!("warning: {}", error);
                     }

@@ -10,3 +10,6 @@ rayon = "1.10"
 ignore = "0.4"
 clap = { version = "4", features = ["derive"] }
 thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
