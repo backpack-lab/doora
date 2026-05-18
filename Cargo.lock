@@ -75,6 +75,7 @@ dependencies = [
  "clap_complete",
  "ignore",
  "rayon",
+ "regex",
  "tempfile",
  "thiserror",
  "tree-sitter",

@@ -1,8 +1,16 @@
 use std::{collections::HashSet, path::Path, sync::Arc};
 
+use regex::Regex;
 use tree_sitter::{Node, Query, QueryCursor, Tree};
 
 use crate::types::{AppError, MatchResult, Result};
+
+#[derive(Debug)]
+pub struct RegexPredicate {
+    pub pattern_index: usize,
+    pub capture_index: u32,
+    pub regex: Arc<Regex>,
+}
 
 #[derive(Debug)]
 pub struct CompiledQuery {
@@ -10,6 +18,7 @@ pub struct CompiledQuery {
     pub kind_ids: HashSet<u16>,
     #[allow(dead_code)]
     pub language: tree_sitter::Language,
+    pub regex_predicates: Vec<RegexPredicate>,
 }
 
 fn build_kind_ids(language: &tree_sitter::Language, query_source: &str) -> HashSet<u16> {
@@ -25,6 +34,122 @@ fn build_kind_ids(language: &tree_sitter::Language, query_source: &str) -> HashS
         .collect()
 }
 
+fn build_regex_predicates(
+    query: &Query,
+    query_source: &str,
+) -> std::result::Result<Vec<RegexPredicate>, AppError> {
+    let mut predicates = Vec::new();
+
+    let mut pattern_starts = Vec::with_capacity(query.pattern_count() + 1);
+    for pattern_index in 0..query.pattern_count() {
+        pattern_starts.push(query.start_byte_for_pattern(pattern_index));
+    }
+    pattern_starts.push(query_source.len());
+
+    for (pattern_index, window) in pattern_starts.windows(2).enumerate() {
+        let pattern_source = &query_source[window[0]..window[1]];
+        let mut search_offset = 0usize;
+
+        while let Some(relative_offset) = pattern_source[search_offset..].find("#match?") {
+            let mut index = search_offset + relative_offset + "#match?".len();
+            let bytes = pattern_source.as_bytes();
+
+            while index < pattern_source.len() && bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+
+            if index >= pattern_source.len() || bytes[index] != b'@' {
+                search_offset = index.saturating_add(1);
+                continue;
+            }
+
+            index += 1;
+            let capture_start = index;
+            while index < pattern_source.len() {
+                let byte = bytes[index];
+                if byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' {
+                    index += 1;
+                } else {
+                    break;
+                }
+            }
+
+            if capture_start == index {
+                search_offset = index.saturating_add(1);
+                continue;
+            }
+
+            let capture_name = &pattern_source[capture_start..index];
+
+            while index < pattern_source.len() && bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+
+            if index >= pattern_source.len() || bytes[index] != b'"' {
+                search_offset = index.saturating_add(1);
+                continue;
+            }
+
+            index += 1;
+            let mut regex_source = String::new();
+            let mut escaped = false;
+
+            while index < pattern_source.len() {
+                let ch = pattern_source[index..].chars().next().unwrap();
+                index += ch.len_utf8();
+
+                if escaped {
+                    match ch {
+                        'n' => regex_source.push('\n'),
+                        'r' => regex_source.push('\r'),
+                        't' => regex_source.push('\t'),
+                        '"' => regex_source.push('"'),
+                        '\\' => regex_source.push('\\'),
+                        other => regex_source.push(other),
+                    }
+                    escaped = false;
+                    continue;
+                }
+
+                if ch == '\\' {
+                    escaped = true;
+                    continue;
+                }
+
+                if ch == '"' {
+                    break;
+                }
+
+                regex_source.push(ch);
+            }
+
+            let capture_index = match query.capture_index_for_name(capture_name) {
+                Some(index) => index,
+                None => {
+                    search_offset = index;
+                    continue;
+                }
+            };
+
+            let regex = Regex::new(&regex_source).map_err(|error| {
+                AppError::QueryCompileError(format!(
+                    "invalid regex in #match? predicate '{}': {}",
+                    regex_source, error
+                ))
+            })?;
+
+            predicates.push(RegexPredicate {
+                pattern_index,
+                capture_index,
+                regex: Arc::new(regex),
+            });
+            search_offset = index;
+        }
+    }
+
+    Ok(predicates)
+}
+
 #[allow(clippy::missing_errors_doc)]
 pub fn compile_query(
     language: &tree_sitter::Language,
@@ -34,8 +159,14 @@ pub fn compile_query(
         .map_err(|error| AppError::QueryCompileError(error.to_string()))?;
 
     let kind_ids = build_kind_ids(language, query_source);
+    let regex_predicates = build_regex_predicates(&query, query_source)?;
 
-    Ok(Arc::new(CompiledQuery { query: Arc::new(query), kind_ids, language: language.clone() }))
+    Ok(Arc::new(CompiledQuery {
+        query: Arc::new(query),
+        kind_ids,
+        language: language.clone(),
+        regex_predicates,
+    }))
 }
 
 #[must_use]
@@ -57,6 +188,24 @@ pub fn extract_matches(
             query_match.captures.iter().any(|c| compiled.kind_ids.contains(&c.node.kind_id()));
 
         if !any_capture_matches {
+            continue;
+        }
+
+        let passes_regex = compiled
+            .regex_predicates
+            .iter()
+            .filter(|predicate| predicate.pattern_index == query_match.pattern_index as usize)
+            .all(|predicate| {
+                query_match
+                    .captures
+                    .iter()
+                    .find(|capture| capture.index == predicate.capture_index)
+                    .and_then(|capture| source.get(capture.node.byte_range()))
+                    .map(|text| predicate.regex.is_match(text))
+                    .unwrap_or(false)
+            });
+
+        if !passes_regex {
             continue;
         }
 
@@ -834,5 +983,190 @@ fn reconnect() {}
         let rust_lang = get_language("rust").unwrap();
         let compiled = compile_query(&rust_lang, "(identifier) @id").unwrap();
         assert_eq!(compiled.language.node_kind_count(), rust_lang.node_kind_count());
+    }
+    #[test]
+    fn test_compile_query_builds_regex_predicates() {
+        use crate::parser::get_language;
+
+        let lang = get_language("rust").unwrap();
+        let compiled = compile_query(
+            &lang,
+            r#"(function_item name: (identifier) @fn (#match? @fn "^handle_"))"#,
+        )
+        .unwrap();
+
+        assert_eq!(compiled.regex_predicates.len(), 1);
+        assert_eq!(compiled.regex_predicates[0].pattern_index, 0);
+    }
+
+    #[test]
+    fn test_compile_query_no_regex_predicates_without_match() {
+        use crate::parser::get_language;
+
+        let lang = get_language("rust").unwrap();
+        let compiled = compile_query(&lang, "(function_item name: (identifier) @fn_name)").unwrap();
+
+        assert!(compiled.regex_predicates.is_empty());
+    }
+
+    #[test]
+    fn test_compile_query_invalid_regex_returns_error() {
+        use crate::parser::get_language;
+
+        let lang = get_language("rust").unwrap();
+        let result = compile_query(
+            &lang,
+            r#"(function_item name: (identifier) @fn (#match? @fn "[invalid"))"#,
+        );
+
+        assert!(matches!(result, Err(AppError::QueryCompileError(_))));
+
+        if let Err(AppError::QueryCompileError(message)) = result {
+            assert!(!message.is_empty());
+            assert!(message.contains("regex") || message.contains("parse"));
+        }
+    }
+
+    #[test]
+    fn test_match_predicate_filters_via_precompiled_regex() {
+        use crate::parser::{get_language, parse_file};
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let source = "fn handle_request() {}\nfn process() {}\nfn handle_response() {}";
+        let lang = get_language("rust").unwrap();
+        let compiled = compile_query(
+            &lang,
+            r#"(function_item name: (identifier) @fn_name (#match? @fn_name "^handle_"))"#,
+        )
+        .unwrap();
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{}", source).unwrap();
+        let (tree, src) = parse_file(file.path(), &lang).unwrap();
+        let results = extract_matches(&tree, &src, &compiled, file.path());
+        drop(tree);
+        drop(src);
+
+        assert_eq!(results.len(), 2);
+        let names: Vec<&str> = results.iter().map(|result| result.matched_text.as_str()).collect();
+        assert!(names.contains(&"handle_request"));
+        assert!(names.contains(&"handle_response"));
+        assert!(!names.contains(&"process"));
+    }
+
+    #[test]
+    fn test_match_predicate_anchored_end() {
+        use crate::parser::{get_language, parse_file};
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let source = "fn init_server() {}\nfn init() {}\nfn reinit() {}";
+        let lang = get_language("rust").unwrap();
+        let compiled = compile_query(
+            &lang,
+            r#"(function_item name: (identifier) @fn_name (#match? @fn_name "^init$"))"#,
+        )
+        .unwrap();
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{}", source).unwrap();
+        let (tree, src) = parse_file(file.path(), &lang).unwrap();
+        let results = extract_matches(&tree, &src, &compiled, file.path());
+        drop(tree);
+        drop(src);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].matched_text, "init");
+    }
+
+    #[test]
+    fn test_multiple_match_predicates_all_evaluated() {
+        use crate::parser::get_language;
+
+        let lang = get_language("rust").unwrap();
+        let compiled = compile_query(
+            &lang,
+            r#"(function_item name: (identifier) @fn (#match? @fn "^get_") (#match? @fn "_data$"))"#,
+        )
+        .unwrap();
+
+        assert_eq!(compiled.regex_predicates.len(), 2);
+    }
+
+    #[test]
+    fn test_regex_arc_not_cloned_during_traversal() {
+        use crate::parser::{get_language, parse_file};
+        use std::io::Write;
+        use std::sync::Arc;
+        use tempfile::NamedTempFile;
+
+        let source = "fn handle_it() {}";
+        let lang = get_language("rust").unwrap();
+        let compiled = compile_query(
+            &lang,
+            r#"(function_item name: (identifier) @fn (#match? @fn "^handle_"))"#,
+        )
+        .unwrap();
+
+        let regex_arc = Arc::clone(&compiled.regex_predicates[0].regex);
+        let count_before = Arc::strong_count(&regex_arc);
+
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{}", source).unwrap();
+        let (tree, src) = parse_file(file.path(), &lang).unwrap();
+        let _ = extract_matches(&tree, &src, &compiled, file.path());
+        drop(tree);
+        drop(src);
+
+        let count_after = Arc::strong_count(&regex_arc);
+        assert_eq!(count_before, count_after);
+    }
+
+    #[test]
+    fn test_no_regex_predicates_still_matches() {
+        use crate::parser::{get_language, parse_file};
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let source = "fn foo() {}\nfn bar() {}";
+        let lang = get_language("rust").unwrap();
+        let compiled = compile_query(&lang, "(function_item name: (identifier) @fn_name)").unwrap();
+        assert!(compiled.regex_predicates.is_empty());
+
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{}", source).unwrap();
+        let (tree, src) = parse_file(file.path(), &lang).unwrap();
+        let results = extract_matches(&tree, &src, &compiled, file.path());
+        drop(tree);
+        drop(src);
+
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_match_predicate_python_language() {
+        use crate::parser::{get_language, parse_file};
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let source = "def test_login(): pass\ndef login(): pass\ndef test_logout(): pass";
+        let lang = get_language("python").unwrap();
+        let compiled = compile_query(
+            &lang,
+            r#"(function_definition name: (identifier) @fn (#match? @fn "^test_"))"#,
+        )
+        .unwrap();
+        assert_eq!(compiled.regex_predicates.len(), 1);
+
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{}", source).unwrap();
+        let (tree, src) = parse_file(file.path(), &lang).unwrap();
+        let results = extract_matches(&tree, &src, &compiled, file.path());
+        drop(tree);
+        drop(src);
+
+        assert_eq!(results.len(), 2);
+        let names: Vec<&str> = results.iter().map(|result| result.matched_text.as_str()).collect();
+        assert!(names.contains(&"test_login"));
+        assert!(names.contains(&"test_logout"));
     }
 } // mod tests
