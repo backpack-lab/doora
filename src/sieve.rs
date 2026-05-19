@@ -74,7 +74,8 @@ pub fn get_file_index_status(
         None => return FileIndexStatus::NotIndexed,
     };
 
-    if entry.mtime_secs != metadata_mtime_secs(metadata) || entry.file_size_bytes != metadata.len() {
+    if entry.mtime_secs != metadata_mtime_secs(metadata) || entry.file_size_bytes != metadata.len()
+    {
         return FileIndexStatus::Stale;
     }
 
@@ -158,14 +159,17 @@ mod tests {
 
     #[test]
     fn test_extract_literal_strings_eq_predicate() {
-        let queries = vec![("(function_item name: (identifier) @fn (#eq? @fn \"authenticate\"))").to_string()];
+        let queries = vec![
+            ("(function_item name: (identifier) @fn (#eq? @fn \"authenticate\"))").to_string()
+        ];
         let literals = extract_literal_strings_from_queries(&queries);
         assert!(literals.contains(&"authenticate".to_string()));
     }
 
     #[test]
     fn test_extract_literal_strings_match_predicate() {
-        let queries = vec![("(function_item name: (identifier) @fn (#match? @fn \"^handle_\"))").to_string()];
+        let queries =
+            vec![("(function_item name: (identifier) @fn (#match? @fn \"^handle_\"))").to_string()];
         let literals = extract_literal_strings_from_queries(&queries);
         assert!(literals.contains(&"^handle_".to_string()));
     }
@@ -198,7 +202,8 @@ mod tests {
 
     #[test]
     fn test_extract_literal_strings_escaped_quotes() {
-        let queries = vec![("(function_item name: (identifier) @fn (#eq? @fn \"a\\\"b\"))").to_string()];
+        let queries =
+            vec![("(function_item name: (identifier) @fn (#eq? @fn \"a\\\"b\"))").to_string()];
         let literals = extract_literal_strings_from_queries(&queries);
         assert!(literals.contains(&"a\\\"b".to_string()));
     }
@@ -208,12 +213,15 @@ mod tests {
         let queries = vec![("(function_item name: (identifier) @fn_name)").to_string()];
         let set = build_query_trigram_set(&queries);
         assert!(!set.has_literals);
-        assert!(set.per_query_trigrams.is_empty() || set.per_query_trigrams.iter().all(Vec::is_empty));
+        assert!(
+            set.per_query_trigrams.is_empty() || set.per_query_trigrams.iter().all(Vec::is_empty)
+        );
     }
 
     #[test]
     fn test_build_query_trigram_set_with_literal() {
-        let queries = vec![("(function_item name: (identifier) @fn (#eq? @fn \"connect\"))").to_string()];
+        let queries =
+            vec![("(function_item name: (identifier) @fn (#eq? @fn \"connect\"))").to_string()];
         let set = build_query_trigram_set(&queries);
         assert!(set.has_literals);
         assert!(set.per_query_trigrams.iter().any(|trigrams| !trigrams.is_empty()));
@@ -224,7 +232,8 @@ mod tests {
 
     #[test]
     fn test_build_query_trigram_set_short_literal() {
-        let queries = vec![("(function_item name: (identifier) @fn (#eq? @fn \"fn\"))").to_string()];
+        let queries =
+            vec![("(function_item name: (identifier) @fn (#eq? @fn \"fn\"))").to_string()];
         let set = build_query_trigram_set(&queries);
         assert!(!set.has_literals);
         assert!(set.per_query_trigrams.iter().all(Vec::is_empty));
@@ -243,7 +252,9 @@ mod tests {
         for trigram in extract_unique_trigrams_from_bytes(b"authenticate") {
             filter.insert(&trigram);
         }
-        let queries = vec![("(function_item name: (identifier) @fn (#eq? @fn \"authenticate\"))").to_string()];
+        let queries = vec![
+            ("(function_item name: (identifier) @fn (#eq? @fn \"authenticate\"))").to_string()
+        ];
         let trigram_set = build_query_trigram_set(&queries);
         assert!(should_parse_file(&filter, &trigram_set));
     }
@@ -251,7 +262,9 @@ mod tests {
     #[test]
     fn test_should_parse_file_trigrams_absent_returns_false() {
         let filter = BloomFilter::new();
-        let queries = vec![("(function_item name: (identifier) @fn (#eq? @fn \"authenticate\"))").to_string()];
+        let queries = vec![
+            ("(function_item name: (identifier) @fn (#eq? @fn \"authenticate\"))").to_string()
+        ];
         let trigram_set = build_query_trigram_set(&queries);
         assert!(!should_parse_file(&filter, &trigram_set));
     }
@@ -288,7 +301,10 @@ mod tests {
         let file = tmp.path().join("a.rs");
         fs::write(&file, "fn main() {}\n").unwrap();
         let metadata = fs::metadata(&file).unwrap();
-        assert!(matches!(get_file_index_status(&manifest, &file, &metadata), FileIndexStatus::NotIndexed));
+        assert!(matches!(
+            get_file_index_status(&manifest, &file, &metadata),
+            FileIndexStatus::NotIndexed
+        ));
     }
 
     #[test]
@@ -312,7 +328,10 @@ mod tests {
             bloom_bits,
             language: "rust".to_string(),
         });
-        assert!(matches!(get_file_index_status(&manifest, &file, &metadata), FileIndexStatus::Fresh(_)));
+        assert!(matches!(
+            get_file_index_status(&manifest, &file, &metadata),
+            FileIndexStatus::Fresh(_)
+        ));
     }
 
     #[test]
@@ -330,7 +349,10 @@ mod tests {
             bloom_bits,
             language: "rust".to_string(),
         });
-        assert!(matches!(get_file_index_status(&manifest, &file, &metadata), FileIndexStatus::Stale));
+        assert!(matches!(
+            get_file_index_status(&manifest, &file, &metadata),
+            FileIndexStatus::Stale
+        ));
     }
 
     #[test]
@@ -348,7 +370,10 @@ mod tests {
             bloom_bits,
             language: "rust".to_string(),
         });
-        assert!(matches!(get_file_index_status(&manifest, &file, &metadata), FileIndexStatus::Stale));
+        assert!(matches!(
+            get_file_index_status(&manifest, &file, &metadata),
+            FileIndexStatus::Stale
+        ));
     }
 
     #[test]
@@ -365,7 +390,10 @@ mod tests {
             bloom_bits: vec![0u8; BLOOM_BYTES - 1],
             language: "rust".to_string(),
         });
-        assert!(matches!(get_file_index_status(&manifest, &file, &metadata), FileIndexStatus::Stale));
+        assert!(matches!(
+            get_file_index_status(&manifest, &file, &metadata),
+            FileIndexStatus::Stale
+        ));
     }
 
     #[test]
@@ -386,10 +414,15 @@ mod tests {
             bloom_bits: filter.to_bytes().to_vec(),
             language: "rust".to_string(),
         });
-        let trigram_set = build_query_trigram_set(&[("(function_item name: (identifier) @fn (#eq? @fn \"authenticate\"))").to_string()]);
+        let trigram_set = build_query_trigram_set(&[
+            ("(function_item name: (identifier) @fn (#eq? @fn \"authenticate\"))").to_string(),
+        ]);
         match get_file_index_status(&manifest, &file, &metadata) {
             FileIndexStatus::Fresh(found_filter) => {
-                assert!(should_parse_file(&found_filter, &trigram_set), "zero false negatives violated");
+                assert!(
+                    should_parse_file(&found_filter, &trigram_set),
+                    "zero false negatives violated"
+                );
             }
             other => panic!("expected fresh index status, got {:?}", other),
         }
@@ -413,10 +446,15 @@ mod tests {
             bloom_bits: filter.to_bytes().to_vec(),
             language: "rust".to_string(),
         });
-        let trigram_set = build_query_trigram_set(&[("(function_item name: (identifier) @fn (#eq? @fn \"xyzzy_not_present\"))").to_string()]);
+        let trigram_set = build_query_trigram_set(&[
+            ("(function_item name: (identifier) @fn (#eq? @fn \"xyzzy_not_present\"))").to_string(),
+        ]);
         match get_file_index_status(&manifest, &file, &metadata) {
             FileIndexStatus::Fresh(found_filter) => {
-                assert!(!should_parse_file(&found_filter, &trigram_set), "Bloom filter unexpectedly accepted a file that should be rejected");
+                assert!(
+                    !should_parse_file(&found_filter, &trigram_set),
+                    "Bloom filter unexpectedly accepted a file that should be rejected"
+                );
             }
             other => panic!("expected fresh index status, got {:?}", other),
         }

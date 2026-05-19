@@ -103,7 +103,7 @@ fn bit_indices(trigram: &[u8; 3]) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trigram::{extract_unique_trigrams, extract_query_trigrams};
+    use crate::trigram::{extract_query_trigrams, extract_unique_trigrams};
 
     #[test]
     fn test_new_filter_all_zeros() {
@@ -228,7 +228,18 @@ mod tests {
 
     #[test]
     fn test_hash_functions_are_independent() {
-        let samples = vec![[b'a', b'b', b'c'], [b'f', b'n', b' '], [b'g', b'o', b'o'], [b'h', b'e', b'y'], [b'r', b'u', b's'], [b't', b'e', b's'], [b'u', b'n', b'i'], [b'v', b'a', b'r'], [b'x', b'y', b'z'], [b'k', b'l', b'm']];
+        let samples = vec![
+            [b'a', b'b', b'c'],
+            [b'f', b'n', b' '],
+            [b'g', b'o', b'o'],
+            [b'h', b'e', b'y'],
+            [b'r', b'u', b's'],
+            [b't', b'e', b's'],
+            [b'u', b'n', b'i'],
+            [b'v', b'a', b'r'],
+            [b'x', b'y', b'z'],
+            [b'k', b'l', b'm'],
+        ];
         let mut distinct = 0usize;
         for s in samples {
             let (a, b) = bit_indices(&s);

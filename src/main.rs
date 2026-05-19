@@ -28,7 +28,10 @@ use bloom::BloomFilter;
 use index::{index_path_for_root, load_index, save_index, IndexEntry, IndexManifest};
 use output::{print_match, print_summary, resolve_color_mode, ColorMode};
 use parser::{detect_language, get_all_languages, parse_file_with_metadata};
-use sieve::{build_query_trigram_set, get_file_index_status, should_parse_file, FileIndexStatus, QueryTrigramSet};
+use sieve::{
+    build_query_trigram_set, get_file_index_status, should_parse_file, FileIndexStatus,
+    QueryTrigramSet,
+};
 use trigram::extract_unique_trigrams_from_bytes;
 use types::{AppError, LangMode, Language, MatchResult, SearchConfig};
 use walker::{build_auto_walker, build_walker};
@@ -421,10 +424,14 @@ fn run_search(
                     *count_guard += 1;
 
                     if !no_update_index
-                        && matches!(file_index_status, FileIndexStatus::Stale | FileIndexStatus::NotIndexed)
+                        && matches!(
+                            file_index_status,
+                            FileIndexStatus::Stale | FileIndexStatus::NotIndexed
+                        )
                     {
                         let mut bloom_filter = BloomFilter::new();
-                        bloom_filter.insert_trigrams(&extract_unique_trigrams_from_bytes(source_bytes));
+                        bloom_filter
+                            .insert_trigrams(&extract_unique_trigrams_from_bytes(source_bytes));
                         let index_entry = IndexEntry {
                             path: entry.path().to_path_buf(),
                             mtime_secs: metadata
@@ -441,9 +448,9 @@ fn run_search(
                             .lock()
                             .expect("index_manifest Mutex was poisoned by a panicked thread");
                         manifest_guard.upsert_entry(index_entry);
-                        *index_entries_updated_ref
-                            .lock()
-                            .expect("index_entries_updated Mutex was poisoned by a panicked thread") += 1;
+                        *index_entries_updated_ref.lock().expect(
+                            "index_entries_updated Mutex was poisoned by a panicked thread",
+                        ) += 1;
                     }
 
                     drop(tree);
@@ -528,12 +535,12 @@ fn run_search(
     };
     let index_entries_updated = {
         match Arc::try_unwrap(index_entries_updated_count) {
-            Ok(mutex) => {
-                mutex.into_inner().expect("index_entries_updated Mutex was poisoned by a panicked thread")
-            }
-            Err(shared) => {
-                *shared.lock().expect("index_entries_updated Mutex was poisoned by a panicked thread")
-            }
+            Ok(mutex) => mutex
+                .into_inner()
+                .expect("index_entries_updated Mutex was poisoned by a panicked thread"),
+            Err(shared) => *shared
+                .lock()
+                .expect("index_entries_updated Mutex was poisoned by a panicked thread"),
         }
     };
 
@@ -600,9 +607,8 @@ fn main() {
     );
 
     if !cli.no_update_index && outcome.index_entries_updated > 0 {
-        let manifest_guard = index_manifest
-            .lock()
-            .expect("index_manifest Mutex was poisoned by a panicked thread");
+        let manifest_guard =
+            index_manifest.lock().expect("index_manifest Mutex was poisoned by a panicked thread");
         let _ = save_index(&manifest_guard, &index_path);
     }
 

@@ -1,6 +1,6 @@
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use dora::parser::{get_language, parse_file_with_threshold};
 use dora::query::{compile_multi_query, extract_multi_matches};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::io::Write;
 use std::path::PathBuf;
 use tempfile::{NamedTempFile, TempDir};
