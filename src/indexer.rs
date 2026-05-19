@@ -1,17 +1,17 @@
+use rayon::prelude::*;
+use std::collections::HashSet;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::collections::HashSet;
-use rayon::prelude::*;
-use std::fs;
 
-use crate::types::{Result, LangMode, Language};
-use crate::index::{IndexManifest, IndexEntry};
-use crate::index::index_path_for_root;
-use crate::trigram::extract_unique_trigrams_from_bytes;
-use crate::parser::detect_language;
-use crate::walker::{build_walker, build_auto_walker};
 use crate::bloom::BloomFilter;
+use crate::index::index_path_for_root;
+use crate::index::{IndexEntry, IndexManifest};
+use crate::parser::detect_language;
+use crate::trigram::extract_unique_trigrams_from_bytes;
+use crate::types::{LangMode, Language, Result};
+use crate::walker::{build_auto_walker, build_walker};
 
 pub fn build_index(root: &Path, lang_mode: &LangMode, verbose: bool) -> Result<()> {
     let root_abs = match fs::canonicalize(root) {
@@ -107,14 +107,22 @@ pub fn build_index(root: &Path, lang_mode: &LangMode, verbose: bool) -> Result<(
     let indexed = *indexed_count.lock().unwrap();
     let skipped = *skipped_count.lock().unwrap();
 
-    eprintln!("indexed {} files, skipped {} fresh, removed {} stale entries", indexed, skipped, removed);
+    eprintln!(
+        "indexed {} files, skipped {} fresh, removed {} stale entries",
+        indexed, skipped, removed
+    );
     eprintln!("index written to {}", index_path.display());
 
     Ok(())
 }
 
 fn is_fresh(entry: &IndexEntry, metadata: &fs::Metadata) -> bool {
-    let mtime = metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or_default();
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
     mtime == entry.mtime_secs && metadata.len() == entry.file_size_bytes
 }
 
@@ -123,13 +131,24 @@ fn index_file(path: &Path, metadata: &fs::Metadata, language: &str) -> Result<In
     let trigrams = extract_unique_trigrams_from_bytes(&bytes);
     let mut filter = BloomFilter::new();
     filter.insert_trigrams(&trigrams);
-    let mtime = metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or_default();
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
     let size = metadata.len();
     let abs = match fs::canonicalize(path) {
         Ok(p) => p,
         Err(_) => path.to_path_buf(),
     };
-    let entry = IndexEntry { path: abs, mtime_secs: mtime, file_size_bytes: size, bloom_bits: filter.to_bytes().to_vec(), language: language.to_string() };
+    let entry = IndexEntry {
+        path: abs,
+        mtime_secs: mtime,
+        file_size_bytes: size,
+        bloom_bits: filter.to_bytes().to_vec(),
+        language: language.to_string(),
+    };
     Ok(entry)
 }
 
@@ -145,15 +164,13 @@ fn lang_to_str(lang: &Language) -> &'static str {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-    use crate::index::IndexEntry;
     use crate::bloom::BloomFilter;
+    use crate::index::IndexEntry;
     use crate::types::LangMode;
+    use tempfile::TempDir;
 
     #[test]
     fn test_is_fresh_true_when_mtime_and_size_match() {
@@ -161,8 +178,15 @@ mod tests {
         let file = tmp.path().join("a.rs");
         fs::write(&file, "fn main() {}\n").unwrap();
         let metadata = fs::metadata(&file).unwrap();
-        let mtime = metadata.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let entry = IndexEntry { path: file.clone(), mtime_secs: mtime, file_size_bytes: metadata.len(), bloom_bits: vec![], language: "rust".to_string() };
+        let mtime =
+            metadata.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let entry = IndexEntry {
+            path: file.clone(),
+            mtime_secs: mtime,
+            file_size_bytes: metadata.len(),
+            bloom_bits: vec![],
+            language: "rust".to_string(),
+        };
         assert!(is_fresh(&entry, &metadata));
     }
 
@@ -172,7 +196,19 @@ mod tests {
         let file = tmp.path().join("a.rs");
         fs::write(&file, "fn main() {}\n").unwrap();
         let metadata = fs::metadata(&file).unwrap();
-        let entry = IndexEntry { path: file.clone(), mtime_secs: metadata.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 1, file_size_bytes: metadata.len(), bloom_bits: vec![], language: "rust".to_string() };
+        let entry = IndexEntry {
+            path: file.clone(),
+            mtime_secs: metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 1,
+            file_size_bytes: metadata.len(),
+            bloom_bits: vec![],
+            language: "rust".to_string(),
+        };
         assert!(!is_fresh(&entry, &metadata));
     }
 
@@ -182,7 +218,18 @@ mod tests {
         let file = tmp.path().join("a.rs");
         fs::write(&file, "fn main() {}\n").unwrap();
         let metadata = fs::metadata(&file).unwrap();
-        let entry = IndexEntry { path: file.clone(), mtime_secs: metadata.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), file_size_bytes: metadata.len() + 1, bloom_bits: vec![], language: "rust".to_string() };
+        let entry = IndexEntry {
+            path: file.clone(),
+            mtime_secs: metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            file_size_bytes: metadata.len() + 1,
+            bloom_bits: vec![],
+            language: "rust".to_string(),
+        };
         assert!(!is_fresh(&entry, &metadata));
     }
 
@@ -225,9 +272,11 @@ mod tests {
         let a = tmp.path().join("a.rs");
         fs::write(&a, "fn a() {}\n").unwrap();
         build_index(tmp.path(), &LangMode::Single(Language::Rust), false).unwrap();
-        let before = crate::index::load_index(&crate::index::index_path_for_root(tmp.path())).unwrap();
+        let before =
+            crate::index::load_index(&crate::index::index_path_for_root(tmp.path())).unwrap();
         build_index(tmp.path(), &LangMode::Single(Language::Rust), false).unwrap();
-        let after = crate::index::load_index(&crate::index::index_path_for_root(tmp.path())).unwrap();
+        let after =
+            crate::index::load_index(&crate::index::index_path_for_root(tmp.path())).unwrap();
         assert_eq!(before.entries.len(), after.entries.len());
     }
 
@@ -237,10 +286,15 @@ mod tests {
         let a = tmp.path().join("a.rs");
         fs::write(&a, "fn a() {}\n").unwrap();
         build_index(tmp.path(), &LangMode::Single(Language::Rust), false).unwrap();
-        let _entry = crate::index::load_index(&crate::index::index_path_for_root(tmp.path())).unwrap().entries.pop().unwrap();
+        let _entry = crate::index::load_index(&crate::index::index_path_for_root(tmp.path()))
+            .unwrap()
+            .entries
+            .pop()
+            .unwrap();
         fs::write(&a, "fn a_changed() {}\n").unwrap();
         build_index(tmp.path(), &LangMode::Single(Language::Rust), false).unwrap();
-        let after = crate::index::load_index(&crate::index::index_path_for_root(tmp.path())).unwrap();
+        let after =
+            crate::index::load_index(&crate::index::index_path_for_root(tmp.path())).unwrap();
         assert!(after.entries.len() >= 1);
     }
 
@@ -252,11 +306,13 @@ mod tests {
         fs::write(&a, "fn a() {}\n").unwrap();
         fs::write(&b, "fn b() {}\n").unwrap();
         build_index(tmp.path(), &LangMode::Single(Language::Rust), false).unwrap();
-        let manifest = crate::index::load_index(&crate::index::index_path_for_root(tmp.path())).unwrap();
+        let manifest =
+            crate::index::load_index(&crate::index::index_path_for_root(tmp.path())).unwrap();
         assert!(manifest.entries.len() >= 2);
         fs::remove_file(&b).unwrap();
         build_index(tmp.path(), &LangMode::Single(Language::Rust), false).unwrap();
-        let manifest2 = crate::index::load_index(&crate::index::index_path_for_root(tmp.path())).unwrap();
+        let manifest2 =
+            crate::index::load_index(&crate::index::index_path_for_root(tmp.path())).unwrap();
         assert!(manifest2.entries.len() >= 1);
     }
 }
