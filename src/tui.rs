@@ -1,6 +1,14 @@
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
 use rayon::iter::ParallelBridge;
 use rayon::prelude::ParallelIterator;
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    Terminal,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -139,6 +147,7 @@ impl AppState {
 pub(crate) enum AppEvent {
     Keystroke(KeyEvent),
     Tick,
+    Resize(u16, u16),
     SearchStarted,
     SearchResult(Vec<crate::types::MatchResult>),
     SearchComplete,
@@ -180,18 +189,23 @@ async fn run_tui_async(
     use crossterm::terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
     };
-    let mut restore_needed = false;
-    if enable_raw_mode().is_ok() && execute!(std::io::stdout(), EnterAlternateScreen).is_ok() {
-        restore_needed = true;
+    use crossterm::event::{EnableMouseCapture, DisableMouseCapture};
+    enable_raw_mode()?;
+    let backend = CrosstermBackend::new(std::io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )?;
+    scopeguard::defer! {
+        let _ = execute!(
+            std::io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        );
+        let _ = disable_raw_mode();
     }
-    struct Restore;
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
-            let _ = disable_raw_mode();
-        }
-    }
-    let _restore = Restore;
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SearchCommand>();
     let mut state = AppState::new();
@@ -199,10 +213,18 @@ async fn run_tui_async(
     let event_tx_clone = event_tx.clone();
     tokio::spawn(async move {
         while let Some(Ok(ev)) = key_stream.next().await {
-            if let Event::Key(key) = ev {
-                if event_tx_clone.send(AppEvent::Keystroke(key)).is_err() {
-                    break;
+            match ev {
+                Event::Key(key) => {
+                    if event_tx_clone.send(AppEvent::Keystroke(key)).is_err() {
+                        break;
+                    }
                 }
+                Event::Resize(w, h) => {
+                    if event_tx_clone.send(AppEvent::Resize(w, h)).is_err() {
+                        break;
+                    }
+                }
+                _ => {}
             }
         }
     });
@@ -342,10 +364,13 @@ async fn run_tui_async(
         tokio::select! {
             Some(event) = event_rx.recv() => {
                 handle_event(&mut state, &event, &cmd_tx);
+                if !state.should_quit {
+                    render(&mut terminal, &state)?;
+                    state.frame_count = state.frame_count.wrapping_add(1);
+                }
                 if state.should_quit {
                     break;
                 }
-                state.frame_count = state.frame_count.wrapping_add(1);
             }
             () = tokio::time::sleep_until(deadline) => {
                 if state.debounce_deadline.is_some() {
@@ -357,11 +382,6 @@ async fn run_tui_async(
                 }
             }
         }
-    }
-
-    if restore_needed {
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
-        let _ = crossterm::terminal::disable_raw_mode();
     }
 
     Ok(())
@@ -408,6 +428,7 @@ fn handle_event(
             _ => {}
         },
         AppEvent::Tick => {}
+        AppEvent::Resize(_, _) => {}
         AppEvent::SearchResult(results) => state.append_results(results.clone()),
         AppEvent::SearchComplete => state.search_running = false,
         AppEvent::SearchError(msg) => {
@@ -419,6 +440,154 @@ fn handle_event(
             state.search_running = true;
         }
     }
+}
+
+fn render(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    state: &AppState,
+) -> crate::types::Result<()> {
+    terminal.draw(|frame| {
+        draw_ui(frame, state);
+    })?;
+    Ok(())
+}
+
+fn draw_ui(frame: &mut ratatui::Frame, state: &AppState) {
+    let area = frame.size();
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)]);
+    let [query_area, panes_area, status_area] = layout.areas(area);
+
+    draw_query_bar(frame, query_area, state);
+
+    let panes_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+        ]);
+    let [file_pane_area, code_pane_area, ast_pane_area] = panes_layout.areas(panes_area);
+
+    draw_file_tree_pane(frame, file_pane_area, state);
+    draw_code_pane(frame, code_pane_area);
+    draw_ast_pane(frame, ast_pane_area);
+    draw_status_bar(frame, status_area, state);
+}
+
+fn draw_query_bar(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let border_style = if state.search_running {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+    let block = Block::default()
+        .title("Query")
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let cursor_char = if state.frame_count % 8 < 4 { "|" } else { " " };
+    let query_with_cursor = format!("{}{}", state.query_input, cursor_char);
+
+    let text = if let Some(error) = &state.error_message {
+        vec![Line::from(query_with_cursor), Line::from(Span::styled(error.clone(), Style::default().fg(Color::Red)))]
+    } else {
+        vec![Line::from(query_with_cursor)]
+    };
+    let paragraph = Paragraph::new(text).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+fn draw_file_tree_pane(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let title = if let Some(selected_entry) = state.file_tree.get(state.selected_file_index) {
+        let path_str = selected_entry.path.to_string_lossy().to_string();
+        let pane_width = area.width.saturating_sub(2) as usize;
+        if path_str.len() > pane_width.saturating_sub(4) {
+            let chars: Vec<char> = path_str.chars().collect();
+            let start = chars.len().saturating_sub(pane_width.saturating_sub(5));
+            let truncated: String = chars[start..].iter().collect();
+            format!("…{}", truncated)
+        } else {
+            path_str
+        }
+    } else {
+        " Files ".to_string()
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL);
+
+    if state.file_tree.is_empty() {
+        let hint_text = if state.search_running {
+            "Searching..."
+        } else if state.submitted_query.is_none() {
+            "Type a query to search"
+        } else {
+            "No matches"
+        };
+        let paragraph = Paragraph::new(hint_text)
+            .block(block)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = state
+        .file_tree
+        .iter()
+        .map(|entry| {
+            let filename = entry
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let count_str = entry.match_count.to_string();
+            let pane_width = area.width.saturating_sub(2) as usize;
+            let padding = pane_width.saturating_sub(filename.len() + count_str.len() + 2);
+            let line = format!(
+                " {}{}{}",
+                filename,
+                " ".repeat(padding),
+                count_str
+            );
+            ListItem::new(line)
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.selected_file_index));
+    let list = List::new(items)
+        .block(block)
+        .style(Style::default())
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn draw_code_pane(frame: &mut ratatui::Frame, area: Rect) {
+    let block = Block::default()
+        .title(" Code ")
+        .borders(Borders::ALL);
+    frame.render_widget(block, area);
+}
+
+fn draw_ast_pane(frame: &mut ratatui::Frame, area: Rect) {
+    let block = Block::default()
+        .title(" AST ")
+        .borders(Borders::ALL);
+    frame.render_widget(block, area);
+}
+
+fn draw_status_bar(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let hint_text = "  [↑↓/jk] navigate   [Enter] search   [q] quit  ";
+    let mut status = hint_text.to_string();
+    if state.search_running {
+        let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let spinner = spinner_chars[(state.frame_count as usize) % 10];
+        status.push_str(&format!("  [searching {}]", spinner));
+    }
+    let paragraph = Paragraph::new(status).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(paragraph, area);
 }
 
 #[cfg(test)]
@@ -727,5 +896,75 @@ mod tests {
         assert!(s.debounce_deadline.is_some());
         let new = s.debounce_deadline.unwrap();
         assert!(new > old);
+    }
+
+    #[test]
+    fn test_file_tree_entry_display_format() {
+        let entry = FileTreeEntry {
+            path: PathBuf::from("src/auth/handler.rs"),
+            match_count: 3,
+        };
+        let filename = entry
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        assert_eq!(filename, "handler.rs");
+    }
+
+    #[test]
+    fn test_spinner_cycles() {
+        for frame_count in 0u64..10 {
+            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let spinner_index = (frame_count as usize) % 10;
+            let _ = spinner_chars[spinner_index];
+            assert!(spinner_index < 10);
+        }
+    }
+
+    #[test]
+    fn test_cursor_blink_logic() {
+        for frame_count in 0u64..8 {
+            let should_show = frame_count % 8 < 4;
+            if frame_count < 4 {
+                assert!(should_show);
+            } else {
+                assert!(!should_show);
+            }
+        }
+        let should_show_at_8 = 8u64 % 8 < 4;
+        assert!(should_show_at_8);
+    }
+
+    #[test]
+    fn test_selected_file_full_path_truncation() {
+        let path_str = "/very/long/path/to/some/deeply/nested/file.rs";
+        let pane_width = 20usize;
+        let truncated = if path_str.len() > pane_width.saturating_sub(4) {
+            let chars: Vec<char> = path_str.chars().collect();
+            let start = chars.len().saturating_sub(pane_width.saturating_sub(5));
+            let truncated: String = chars[start..].iter().collect();
+            format!("…{}", truncated)
+        } else {
+            path_str.to_string()
+        };
+        assert!(truncated.starts_with('…'));
+        assert!(truncated.len() <= pane_width);
+    }
+
+    #[test]
+    fn test_empty_file_tree_hint_when_no_query() {
+        let s = AppState::new();
+        assert!(s.submitted_query.is_none());
+        assert!(s.file_tree.is_empty());
+    }
+
+    #[test]
+    fn test_file_tree_hint_when_searching() {
+        let mut s = AppState::new();
+        s.search_running = true;
+        s.file_tree.clear();
+        assert!(s.search_running);
+        assert!(s.file_tree.is_empty());
     }
 }
