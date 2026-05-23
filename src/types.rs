@@ -57,6 +57,8 @@ pub enum AppError {
 
     #[error("Language not supported: {0}")]
     LanguageNotSupported(String),
+    #[error("database error: {0}")]
+    DbError(String),
     #[error("index file is corrupt or unreadable: {0}")]
     IndexCorrupt(String),
 

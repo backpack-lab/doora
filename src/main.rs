@@ -4,18 +4,20 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use clap::{CommandFactory, Parser};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use rayon::prelude::*;
 
 mod bloom;
 mod index;
+#[allow(dead_code)]
+mod memory;
 mod output;
 mod parser;
 mod query;
@@ -27,7 +29,8 @@ pub mod walker;
 
 use bloom::BloomFilter;
 use index::{index_path_for_root, load_index, save_index, IndexEntry, IndexManifest};
-use output::{print_match, print_summary, resolve_color_mode, ColorMode};
+use memory::{memory_db_path, FileRow, MemoryDb, SymbolKind, SymbolRow};
+use output::{print_lookup_results, print_match, print_summary, resolve_color_mode, ColorMode};
 use parser::{detect_language, get_all_languages, parse_file_with_metadata};
 use sieve::{
     build_query_trigram_set, get_file_index_status, should_parse_file, FileIndexStatus,
@@ -84,11 +87,25 @@ fn handle_file_error(error: &FileError, skip_count: &Mutex<usize>) {
                   dora -q '(function_item name: (identifier) @fn)' -p ./src\n\n\
                   See https://github.com/your-org/dora for full documentation."
 )]
+struct App {
+    #[command(flatten)]
+    cli: Cli,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    Lookup(LookupArgs),
+}
+
+#[derive(Args, Debug)]
+#[command(next_line_help = true)]
 struct Cli {
     #[arg(
         short = 'q',
         long = "query",
-        required = true,
         num_args = 1..,
         value_name = "S-EXPR",
         help = "Tree-sitter S-expression query (repeatable: -q QUERY1 -q QUERY2)",
@@ -189,6 +206,38 @@ struct Cli {
     yes: bool,
 }
 
+#[derive(Args, Debug)]
+struct LookupArgs {
+    #[arg(long = "symbol", value_name = "NAME", help = "Lookup an exact symbol name")]
+    symbol: Option<String>,
+
+    #[arg(long = "prefix", value_name = "PREFIX", help = "Lookup symbols by name prefix")]
+    prefix: Option<String>,
+
+    #[arg(long = "kind", value_name = "KIND", help = "Restrict matches to a symbol kind")]
+    kind: Option<String>,
+
+    #[arg(
+        short = 'p',
+        long = "path",
+        value_name = "DIR",
+        default_value = ".",
+        help = "Root directory whose persisted index should be queried"
+    )]
+    path: PathBuf,
+
+    #[arg(
+        long = "lang",
+        value_name = "LANG",
+        default_value = "auto",
+        help = "Language to filter after lookup: rust, python, js, ts, go, c, cpp, auto"
+    )]
+    lang: String,
+
+    #[arg(long = "no-color", default_value_t = false, help = "Disable ANSI color output")]
+    no_color: bool,
+}
+
 struct SearchOutcome {
     results: Vec<MatchResult>,
     files_walked: usize,
@@ -241,6 +290,200 @@ impl Cli {
 
         Ok(())
     }
+}
+
+impl LookupArgs {
+    fn validate(&self) -> std::result::Result<(), String> {
+        let symbol_present = self.symbol.as_ref().is_some_and(|value| !value.trim().is_empty());
+        let prefix_present = self.prefix.as_ref().is_some_and(|value| !value.trim().is_empty());
+
+        if symbol_present == prefix_present {
+            return Err("specify exactly one of --symbol or --prefix".to_string());
+        }
+
+        if !self.path.exists() {
+            return Err(format!(
+                "path does not exist: {}\n  hint: check for typos or run from the correct directory",
+                self.path.display()
+            ));
+        }
+
+        if !self.path.is_dir() {
+            return Err(format!(
+                "path is not a directory: {}\n  hint: --path must point to a directory, not a file",
+                self.path.display()
+            ));
+        }
+
+        let supported = ["rust", "python", "js", "ts", "go", "c", "cpp", "auto"];
+        if !supported.contains(&self.lang.as_str()) {
+            return Err(format!(
+                "unsupported language: '{}'\n      supported languages: rust, python, js, ts, go, c, cpp, auto\n      example: --lang rust",
+                self.lang
+            ));
+        }
+
+        if let Some(kind) = &self.kind {
+            parse_lookup_kind(kind)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn parse_lookup_kind(kind: &str) -> std::result::Result<SymbolKind, String> {
+    match kind.trim().to_lowercase().as_str() {
+        "function" => Ok(SymbolKind::Function),
+        "method" => Ok(SymbolKind::Method),
+        "struct" => Ok(SymbolKind::Struct),
+        "enum" => Ok(SymbolKind::Enum),
+        "trait" => Ok(SymbolKind::Trait),
+        "interface" => Ok(SymbolKind::Interface),
+        "typealias" => Ok(SymbolKind::TypeAlias),
+        "constant" => Ok(SymbolKind::Constant),
+        "variable" => Ok(SymbolKind::Variable),
+        "class" => Ok(SymbolKind::Class),
+        "module" => Ok(SymbolKind::Module),
+        "import" => Ok(SymbolKind::Import),
+        "unknown" => Ok(SymbolKind::Unknown),
+        _ => Err(format!(
+            "unsupported kind: '{}'\n      supported kinds: function, method, struct, enum, trait, interface, typealias, constant, variable, class, module, import, unknown",
+            kind
+        )),
+    }
+}
+
+fn lookup_db_path(root: &Path) -> PathBuf {
+    memory_db_path(root)
+}
+
+fn open_lookup_db(root: &Path) -> std::result::Result<MemoryDb, String> {
+    let db_path = lookup_db_path(root);
+    if !db_path.exists() {
+        return Err(format!(
+            "no structural index found at {}\n  hint: run dora --persist {} first",
+            db_path.display(),
+            root.display()
+        ));
+    }
+
+    MemoryDb::open(&db_path).map_err(|error| format!("error: {error}"))
+}
+
+fn filter_lookup_rows_by_language(
+    rows: Vec<(SymbolRow, FileRow)>,
+    lang: &str,
+) -> std::result::Result<Vec<(SymbolRow, FileRow)>, String> {
+    if lang == "auto" {
+        return Ok(rows);
+    }
+
+    let desired = lang.to_string();
+    Ok(rows.into_iter().filter(|(_, file)| file.language == desired).collect())
+}
+
+fn execute_symbol_lookup(
+    db: &MemoryDb,
+    symbol: &str,
+    kind: Option<&SymbolKind>,
+    lang: &str,
+) -> std::result::Result<Vec<(SymbolRow, FileRow)>, String> {
+    let symbols = match kind {
+        Some(kind) => db
+            .find_symbols_by_name_and_kind(symbol, kind)
+            .map_err(|error| format!("error: {error}"))?,
+        None => db.find_symbols_by_name(symbol).map_err(|error| format!("error: {error}"))?,
+    };
+
+    collect_lookup_rows(db, symbols, lang)
+}
+
+fn execute_prefix_lookup(
+    db: &MemoryDb,
+    prefix: &str,
+    kind: Option<&SymbolKind>,
+    lang: &str,
+) -> std::result::Result<Vec<(SymbolRow, FileRow)>, String> {
+    let symbols =
+        db.find_symbols_by_name_prefix(prefix).map_err(|error| format!("error: {error}"))?;
+    let symbols = if let Some(kind) = kind {
+        symbols.into_iter().filter(|symbol| &symbol.kind == kind).collect()
+    } else {
+        symbols
+    };
+
+    collect_lookup_rows(db, symbols, lang)
+}
+
+fn collect_lookup_rows(
+    db: &MemoryDb,
+    symbols: Vec<SymbolRow>,
+    lang: &str,
+) -> std::result::Result<Vec<(SymbolRow, FileRow)>, String> {
+    let mut rows = Vec::new();
+
+    for symbol in symbols {
+        let file = db
+            .get_file_by_id(symbol.file_id)
+            .map_err(|error| format!("error: {error}"))?
+            .ok_or_else(|| format!("error: missing file row for file_id {}", symbol.file_id))?;
+        rows.push((symbol, file));
+    }
+
+    let mut filtered = filter_lookup_rows_by_language(rows, lang)?;
+    filtered.sort_by(|left, right| {
+        left.1
+            .path
+            .cmp(&right.1.path)
+            .then_with(|| left.0.start_line.cmp(&right.0.start_line))
+            .then_with(|| left.0.start_col.cmp(&right.0.start_col))
+            .then_with(|| left.0.name.cmp(&right.0.name))
+    });
+    Ok(filtered)
+}
+
+fn run_lookup_mode(args: &LookupArgs) {
+    if let Err(message) = args.validate() {
+        eprintln!("error: {message}");
+        process::exit(1);
+    }
+
+    let color = resolve_color_mode(args.no_color);
+    let db = match open_lookup_db(&args.path) {
+        Ok(db) => db,
+        Err(message) => {
+            eprintln!("error: {message}");
+            process::exit(1);
+        }
+    };
+
+    let kind = match args.kind.as_deref() {
+        Some(kind) => match parse_lookup_kind(kind) {
+            Ok(kind) => Some(kind),
+            Err(message) => {
+                eprintln!("error: {message}");
+                process::exit(1);
+            }
+        },
+        None => None,
+    };
+
+    let results = match (args.symbol.as_deref(), args.prefix.as_deref()) {
+        (Some(symbol), None) => execute_symbol_lookup(&db, symbol, kind.as_ref(), &args.lang),
+        (None, Some(prefix)) => execute_prefix_lookup(&db, prefix, kind.as_ref(), &args.lang),
+        _ => Err("specify exactly one of --symbol or --prefix".to_string()),
+    };
+
+    let results = match results {
+        Ok(results) => results,
+        Err(message) => {
+            eprintln!("error: {message}");
+            process::exit(1);
+        }
+    };
+
+    let mut stdout = std::io::stdout().lock();
+    print_lookup_results(&results, &color, &mut stdout);
 }
 
 fn resolve_lang(lang_str: &str) -> Language {
@@ -599,10 +842,16 @@ fn run_search(
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let app = App::parse();
+    let cli = &app.cli;
+
+    if let Some(Commands::Lookup(args)) = &app.command {
+        run_lookup_mode(args);
+        return;
+    }
 
     if let Some(shell) = cli.generate_completions {
-        let mut cmd = Cli::command();
+        let mut cmd = App::command();
         generate(shell, &mut cmd, "dora", &mut std::io::stdout());
         process::exit(0);
     }
@@ -822,13 +1071,35 @@ fn run_rewrite_mode(
 mod tests {
     use super::{
         format_file_error, handle_file_error, resolve_lang, resolve_lang_mode, Cli, FileError,
-        SearchOutcome,
+        LookupArgs, SearchOutcome,
     };
     use crate::types::{LangMode, Language};
     use clap_complete::Shell;
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
+
+    fn lookup_args_with_symbol(symbol: &str) -> LookupArgs {
+        LookupArgs {
+            symbol: Some(symbol.to_string()),
+            prefix: None,
+            kind: None,
+            path: std::env::temp_dir(),
+            lang: "auto".to_string(),
+            no_color: false,
+        }
+    }
+
+    fn lookup_args_with_prefix(prefix: &str) -> LookupArgs {
+        LookupArgs {
+            symbol: None,
+            prefix: Some(prefix.to_string()),
+            kind: None,
+            path: std::env::temp_dir(),
+            lang: "auto".to_string(),
+            no_color: false,
+        }
+    }
 
     #[test]
     fn test_format_file_error_walker_known_path() {
@@ -1004,6 +1275,71 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err();
         assert_eq!(err_msg, "at least one query string must not be empty");
+    }
+
+    #[test]
+    fn test_lookup_validate_exact_symbol_only() {
+        let args = lookup_args_with_symbol("authenticate");
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_lookup_validate_prefix_only() {
+        let args = lookup_args_with_prefix("auth");
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_lookup_validate_requires_exactly_one_selector() {
+        let args = LookupArgs {
+            symbol: None,
+            prefix: None,
+            kind: None,
+            path: std::env::temp_dir(),
+            lang: "auto".to_string(),
+            no_color: false,
+        };
+        let err = args.validate().unwrap_err();
+        assert!(err.contains("exactly one"));
+
+        let args = LookupArgs {
+            symbol: Some("one".to_string()),
+            prefix: Some("two".to_string()),
+            kind: None,
+            path: std::env::temp_dir(),
+            lang: "auto".to_string(),
+            no_color: false,
+        };
+        let err = args.validate().unwrap_err();
+        assert!(err.contains("exactly one"));
+    }
+
+    #[test]
+    fn test_lookup_validate_rejects_bad_kind() {
+        let args = LookupArgs {
+            symbol: Some("foo".to_string()),
+            prefix: None,
+            kind: Some("not_a_kind".to_string()),
+            path: std::env::temp_dir(),
+            lang: "auto".to_string(),
+            no_color: false,
+        };
+        let err = args.validate().unwrap_err();
+        assert!(err.contains("unsupported kind"));
+    }
+
+    #[test]
+    fn test_lookup_validate_rejects_bad_path() {
+        let args = LookupArgs {
+            symbol: Some("foo".to_string()),
+            prefix: None,
+            kind: None,
+            path: PathBuf::from("/tmp/dora_lookup_missing_dir_12345"),
+            lang: "auto".to_string(),
+            no_color: false,
+        };
+        let err = args.validate().unwrap_err();
+        assert!(err.contains("does not exist"));
     }
 
     #[test]

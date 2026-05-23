@@ -2,8 +2,10 @@
 #![warn(clippy::pedantic)]
 
 pub mod bloom;
+pub mod extractor;
 pub mod index;
 pub mod indexer;
+pub mod memory;
 pub mod output;
 pub mod parser;
 pub mod query;
