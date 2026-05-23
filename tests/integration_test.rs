@@ -1,3 +1,6 @@
+use dora::extractor::SymbolExtractor;
+use dora::memory::{MemoryDb, NewFileRow, NewSymbolRow, SymbolKind};
+use dora::output::{print_lookup_results, ColorMode};
 use dora::parser::{get_language, parse_file};
 use dora::query::{compile_query, extract_matches};
 use dora::types::{Language, MatchResult};
@@ -43,6 +46,41 @@ fn run_pipeline(fixture_dir: &Path, query_str: &str) -> Vec<MatchResult> {
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures")
+}
+
+#[test]
+fn test_lookup_join_and_formatter_integration() {
+    let db = MemoryDb::open_in_memory().unwrap();
+    let file_id = db
+        .upsert_file(&NewFileRow {
+            path: "/tmp/example.rs".to_string(),
+            mtime: 1,
+            language: "rust".to_string(),
+        })
+        .unwrap();
+    db.insert_symbol(&NewSymbolRow {
+        file_id,
+        kind: SymbolKind::Function,
+        name: "authenticate".to_string(),
+        start_line: 12,
+        start_col: 4,
+        end_line: 12,
+        end_col: 16,
+        signature: Some("fn authenticate(user: User) -> bool".to_string()),
+    })
+    .unwrap();
+
+    let symbol = db.find_symbols_by_name("authenticate").unwrap().pop().unwrap();
+    let file = db.get_file_by_id(symbol.file_id).unwrap().unwrap();
+
+    let mut buf = Vec::new();
+    print_lookup_results(&[(symbol, file)], &ColorMode::Off, &mut buf);
+    let output = String::from_utf8(buf).unwrap();
+
+    assert!(output.contains("/tmp/example.rs:12:4"));
+    assert!(output.contains("[@function]"));
+    assert!(output.contains("\"authenticate\""));
+    assert!(!output.contains("signature:"));
 }
 
 #[allow(dead_code)]
@@ -2271,4 +2309,107 @@ fn test_rewrite_dry_run_does_not_modify_fixture() {
     let _ = dora::rewrite::apply_edits_to_files(&edits);
     let after = std::fs::read_to_string(&fixture).unwrap();
     assert_eq!(before, after);
+}
+
+#[test]
+fn test_persist_inserts_symbols_for_rust_fixture() {
+    let fixture = fixtures_dir().join("simple.rs");
+    let db = MemoryDb::open_in_memory().unwrap();
+    let file_id = db
+        .upsert_file(&NewFileRow {
+            path: fixture.display().to_string(),
+            mtime: 1,
+            language: "rust".to_string(),
+        })
+        .unwrap();
+    let ts_lang = get_language("rust").unwrap();
+    let (tree, source) = parse_file(&fixture, &ts_lang).unwrap();
+    let extractor = SymbolExtractor { language: Language::Rust };
+    let symbols = extractor.extract(&tree, &source, file_id);
+    db.insert_symbols_batch(&symbols).unwrap();
+    assert!(db.symbol_count().unwrap() > 0);
+    assert!(!db.find_symbols_by_name("add").unwrap().is_empty());
+}
+
+#[test]
+fn test_persist_extracts_all_fixture_languages() {
+    let fixtures = [
+        ("simple.rs", "rust", Language::Rust),
+        ("simple.py", "python", Language::Python),
+        ("simple.js", "js", Language::JavaScript),
+        ("simple.ts", "ts", Language::TypeScript),
+        ("simple.go", "go", Language::Go),
+        ("simple.c", "c", Language::C),
+        ("simple.cpp", "cpp", Language::Cpp),
+    ];
+
+    for (fixture_name, lang_str, language) in fixtures {
+        let fixture = fixtures_dir().join(fixture_name);
+        let ts_lang = get_language(lang_str).unwrap();
+        let (tree, source) = parse_file(&fixture, &ts_lang).unwrap();
+        let extractor = SymbolExtractor { language };
+        let symbols = extractor.extract(&tree, &source, 1);
+        assert!(!symbols.is_empty(), "expected symbols for {fixture_name}");
+    }
+}
+
+#[test]
+fn test_persist_symbol_positions_match_grep() {
+    let fixture = fixtures_dir().join("simple.rs");
+    let ts_lang = get_language("rust").unwrap();
+    let (tree, source) = parse_file(&fixture, &ts_lang).unwrap();
+    let extractor = SymbolExtractor { language: Language::Rust };
+    let symbols = extractor.extract(&tree, &source, 1);
+    let add = symbols.iter().find(|symbol| symbol.name == "add").unwrap();
+    assert_eq!(add.start_line, 1);
+}
+
+#[test]
+fn test_persist_reindex_replaces_old_symbols() {
+    let db = MemoryDb::open_in_memory().unwrap();
+    let file_id = db
+        .upsert_file(&NewFileRow {
+            path: "/tmp/reindex.rs".to_string(),
+            mtime: 1,
+            language: "rust".to_string(),
+        })
+        .unwrap();
+    let batch_a = vec![
+        NewSymbolRow {
+            file_id,
+            kind: SymbolKind::Function,
+            name: "old_fn".to_string(),
+            start_line: 1,
+            start_col: 0,
+            end_line: 1,
+            end_col: 6,
+            signature: None,
+        },
+        NewSymbolRow {
+            file_id,
+            kind: SymbolKind::Struct,
+            name: "OldStruct".to_string(),
+            start_line: 2,
+            start_col: 0,
+            end_line: 2,
+            end_col: 9,
+            signature: None,
+        },
+    ];
+    db.insert_symbols_batch(&batch_a).unwrap();
+    db.delete_symbols_for_file(file_id).unwrap();
+    let batch_b = vec![NewSymbolRow {
+        file_id,
+        kind: SymbolKind::Function,
+        name: "new_fn".to_string(),
+        start_line: 3,
+        start_col: 0,
+        end_line: 3,
+        end_col: 6,
+        signature: None,
+    }];
+    db.insert_symbols_batch(&batch_b).unwrap();
+    assert!(db.find_symbols_by_name("old_fn").unwrap().is_empty());
+    assert!(db.find_symbols_by_name("OldStruct").unwrap().is_empty());
+    assert_eq!(db.find_symbols_by_name("new_fn").unwrap().len(), 1);
 }

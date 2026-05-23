@@ -1,3 +1,4 @@
+use crate::memory::{FileRow, SymbolRow};
 use crate::types::MatchResult;
 use std::io::Write;
 use std::time::Duration;
@@ -122,6 +123,32 @@ pub fn print_match<W: Write>(result: &MatchResult, color: &ColorMode, writer: &m
     writer.write_all(line.as_bytes()).expect("failed to write match output");
 }
 
+pub fn print_lookup_results<W: Write>(
+    results: &[(SymbolRow, FileRow)],
+    color: &ColorMode,
+    writer: &mut W,
+) {
+    for (symbol, file) in results {
+        let filepath = colorize(&file.path, CYAN, color);
+        let kind = colorize(&symbol.kind.to_string(), YELLOW, color);
+        let name = colorize(&symbol.name, GREEN, color);
+        let line = format!(
+            "{filepath}:{line}:{col}  [@{kind}]  \"{name}\"\n",
+            line = symbol.start_line,
+            col = symbol.start_col,
+        );
+        writer.write_all(line.as_bytes()).expect("failed to write lookup output");
+        if matches!(color, ColorMode::On) {
+            if let Some(signature) = &symbol.signature {
+                let signature_line = format!("  signature: {signature}\n");
+                writer
+                    .write_all(signature_line.as_bytes())
+                    .expect("failed to write lookup signature output");
+            }
+        }
+    }
+}
+
 /// Build the summary string (printed to stderr) without emitting it.
 ///
 /// Always formats duration as milliseconds and chooses singular/plural
@@ -191,9 +218,10 @@ pub fn print_summary<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        colorize, format_match, format_summary, plural_file, plural_match, print_match,
-        print_summary, resolve_color_mode, ColorMode, CYAN, GREEN, YELLOW,
+        colorize, format_match, format_summary, plural_file, plural_match, print_lookup_results,
+        print_match, print_summary, resolve_color_mode, ColorMode, CYAN, GREEN, YELLOW,
     };
+    use crate::memory::{FileRow, SymbolKind, SymbolRow};
     use crate::types::MatchResult;
     use std::io::Write;
     use std::path::PathBuf;
@@ -215,6 +243,29 @@ mod tests {
             start_byte: 0,
             end_byte: 0,
         }
+    }
+
+    fn canonical_lookup_rows() -> (SymbolRow, FileRow) {
+        (
+            SymbolRow {
+                id: 7,
+                file_id: 3,
+                kind: SymbolKind::Function,
+                name: "authenticate".to_string(),
+                start_line: 42,
+                start_col: 4,
+                end_line: 42,
+                end_col: 16,
+                signature: Some("fn authenticate(user: User) -> bool".to_string()),
+            },
+            FileRow {
+                id: 3,
+                path: "src/auth/handler.rs".to_string(),
+                mtime: 1,
+                language: "rust".to_string(),
+                indexed_at: 1,
+            },
+        )
     }
 
     struct FailWriter;
@@ -617,5 +668,31 @@ mod tests {
         assert!(output.contains("block"));
         assert!(output.contains("fn foo()"));
         assert!(output.lines().any(|line| line.contains("block")));
+    }
+
+    #[test]
+    fn test_print_lookup_results_writes_match_like_output() {
+        let (symbol, file) = canonical_lookup_rows();
+        let mut buf: Vec<u8> = Vec::new();
+        print_lookup_results(&[(symbol, file)], &ColorMode::Off, &mut buf);
+        let output = buf_to_string(buf);
+
+        assert!(output.contains("src/auth/handler.rs:42:4"));
+        assert!(output.contains("[@function]"));
+        assert!(output.contains("\"authenticate\""));
+        assert!(!output.contains("signature:"));
+    }
+
+    #[test]
+    fn test_print_lookup_results_prints_signature_only_with_color() {
+        let (symbol, file) = canonical_lookup_rows();
+        let mut buf: Vec<u8> = Vec::new();
+        print_lookup_results(&[(symbol, file)], &ColorMode::On, &mut buf);
+        let output = buf_to_string(buf);
+
+        assert!(output.contains("signature: fn authenticate(user: User) -> bool"));
+        assert!(output.contains("\x1b[36m"));
+        assert!(output.contains("\x1b[33m"));
+        assert!(output.contains("\x1b[32m"));
     }
 }
