@@ -1,9 +1,25 @@
 #![allow(dead_code)]
 
+//! Space-efficient probabilistic Bloom filter utilities used to pre-filter
+//! files by trigrams before expensive parsing or regex checks.
+
+/// Number of bits in the per-file Bloom filter.
+///
+/// Chosen to balance memory usage and false positive rate for typical
+/// repositories scanned by this tool.
 pub const BLOOM_BITS: usize = 4096;
+
+/// Number of bytes backing the Bloom filter (`BLOOM_BITS / 8`).
 pub const BLOOM_BYTES: usize = 512;
+
+/// Number of hash functions used by the Bloom filter implementation.
 pub const NUM_HASH_FUNCTIONS: usize = 2;
 
+/// A small, fixed-size Bloom filter for trigram membership tests.
+///
+/// `BloomFilter` supports inserting 3-byte trigrams and testing for probable
+/// membership. It provides zero false negatives for inserted trigrams and may
+/// yield false positives for non-inserted trigrams.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BloomFilter {
     bits: [u8; BLOOM_BYTES],
@@ -16,10 +32,15 @@ impl Default for BloomFilter {
 }
 
 impl BloomFilter {
+    /// Create a new, empty `BloomFilter` with all bits cleared.
     pub fn new() -> Self {
         BloomFilter { bits: [0u8; BLOOM_BYTES] }
     }
 
+    /// Insert a 3-byte `trigram` into the filter.
+    ///
+    /// This operation sets two bits derived from the trigram and is
+    /// idempotent.
     pub fn insert(&mut self, trigram: &[u8; 3]) {
         let (i1, i2) = bit_indices(trigram);
         let b1 = i1 / 8;
@@ -30,6 +51,11 @@ impl BloomFilter {
         self.bits[b2] |= 1 << o2;
     }
 
+    /// Test whether `trigram` is probably present in the filter.
+    ///
+    /// Guarantees zero false negatives for trigrams that were previously
+    /// inserted. False positives are possible and increase with the number
+    /// of inserted trigrams; see `false_positive_estimate` for an estimate.
     pub fn probably_contains(&self, trigram: &[u8; 3]) -> bool {
         let (i1, i2) = bit_indices(trigram);
         let b1 = i1 / 8;
@@ -42,12 +68,20 @@ impl BloomFilter {
         ((self.bits[b2] >> o2) & 1) == 1
     }
 
+    /// Insert a batch of trigrams into the filter.
+    ///
+    /// This is a convenience wrapper around `insert` and performs bulk
+    /// insertion without additional transactional semantics.
     pub fn insert_trigrams(&mut self, trigrams: &[[u8; 3]]) {
         for t in trigrams {
             self.insert(t);
         }
     }
 
+    /// Return `true` when the filter probably contains all `trigrams`.
+    ///
+    /// This calls `probably_contains` for each trigram and returns `false`
+    /// immediately on the first missing trigram.
     pub fn probably_contains_all(&self, trigrams: &[[u8; 3]]) -> bool {
         for t in trigrams {
             if !self.probably_contains(t) {
@@ -57,20 +91,31 @@ impl BloomFilter {
         true
     }
 
+    /// Serialize the filter to a fixed-size byte array.
+    #[must_use]
     pub fn to_bytes(&self) -> [u8; BLOOM_BYTES] {
         self.bits
     }
 
+    /// Construct a `BloomFilter` from a fixed-size byte array previously
+    /// produced by `to_bytes`.
     pub fn from_bytes(bytes: [u8; BLOOM_BYTES]) -> Self {
         BloomFilter { bits: bytes }
     }
 
+    /// Estimate the false positive probability for the current filter state.
+    ///
+    /// The estimate is derived from the fraction of set bits and the number
+    /// of hash functions; it is an approximation useful for diagnostics.
+    #[must_use]
     pub fn false_positive_estimate(&self) -> f64 {
         let set_bits = self.bit_count();
         let fraction = (set_bits as f64) / (BLOOM_BITS as f64);
         fraction.powi(NUM_HASH_FUNCTIONS as i32)
     }
 
+    /// Count the number of bits currently set in the filter.
+    #[must_use]
     pub fn bit_count(&self) -> usize {
         self.bits.iter().map(|b| b.count_ones() as usize).sum()
     }

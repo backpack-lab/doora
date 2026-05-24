@@ -1,3 +1,10 @@
+//! Filesystem walking helpers used to discover source files for indexing and
+//! searching.
+//!
+//! Provides functions to build iterators over files for a specific language
+//! or to automatically walk files across all supported languages while
+//! respecting common VCS and build directories.
+
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -49,6 +56,10 @@ fn is_binary(path: &Path) -> bool {
     std::str::from_utf8(sample).is_err()
 }
 
+/// Return the filename extensions associated with `lang`.
+///
+/// Extensions are returned without a leading dot and are suitable for use
+/// with `Path::extension()` comparisons.
 #[must_use]
 pub fn extensions_for_language(lang: &Language) -> &'static [&'static str] {
     match lang {
@@ -62,6 +73,11 @@ pub fn extensions_for_language(lang: &Language) -> &'static [&'static str] {
     }
 }
 
+/// Build an iterator yielding directory entries under `root` that match the
+/// file extensions for `lang`.
+///
+/// The iterator filters out common VCS and build directories and returns
+/// `[AppError::WalkError]` on underlying walk failures.
 pub fn build_walker(root: &Path, lang: &Language) -> impl Iterator<Item = Result<DirEntry>> {
     let extensions = extensions_for_language(lang);
 
@@ -92,6 +108,11 @@ pub fn build_walker(root: &Path, lang: &Language) -> impl Iterator<Item = Result
         })
 }
 
+/// Build an iterator yielding entries for files matching any supported
+/// language extensions under `root`.
+///
+/// This is similar to `build_walker` but does not require the caller to
+/// specify a single language; it matches files for all supported languages.
 pub fn build_auto_walker(root: &Path) -> impl Iterator<Item = Result<DirEntry>> {
     let all_extensions: HashSet<&'static str> = [
         Language::Rust,

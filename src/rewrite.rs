@@ -1,13 +1,25 @@
+//! Utilities to perform source rewrites driven by capture-based templates.
+//!
+//! The rewrite module provides templating for replacements, computes edit
+//! ranges, applies edits to source text or files, and generates unified diffs.
 use similar::TextDiff;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// A simple template for performing capture-based rewrites.
+#[derive(Clone, Debug)]
 pub struct RewriteTemplate {
+    /// Raw template text. Capture tokens are written as `@name`.
     pub raw: String,
 }
 
 impl RewriteTemplate {
+    /// Apply `captures` to the template and produce the rewritten string.
+    ///
+    /// Tokens of the form `@name` are replaced with the corresponding value
+    /// from `captures`. Longer token names are substituted before shorter
+    /// ones to allow overlapping names.
     pub fn apply(&self, captures: &HashMap<&str, &str>) -> String {
         let mut names: Vec<&str> = Vec::new();
         let mut i = 0usize;
@@ -49,14 +61,21 @@ impl RewriteTemplate {
     }
 }
 
+/// A single edit to apply to a file: replace the byte range `start_byte..end_byte`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RewriteEdit {
+    /// Path of the file to be edited.
     pub file_path: PathBuf,
+    /// Start byte offset (inclusive) of the edit.
     pub start_byte: usize,
+    /// End byte offset (exclusive) of the edit.
     pub end_byte: usize,
+    /// Replacement text to insert at the range.
     pub new_text: String,
 }
 
+/// Compute `RewriteEdit`s for `results` using `template`.
+#[must_use]
 pub fn compute_edits(
     results: &[crate::types::MatchResult],
     template: &RewriteTemplate,
@@ -78,6 +97,8 @@ pub fn compute_edits(
     edits
 }
 
+/// Apply `edits` to `source` and return the rewritten string or an `Err`
+/// with a diagnostic message when edits overlap or produce invalid UTF-8.
 pub fn apply_edits_to_source(source: &str, edits: &[RewriteEdit]) -> Result<String, String> {
     if edits.is_empty() {
         return Ok(source.to_string());
@@ -107,6 +128,8 @@ pub fn apply_edits_to_source(source: &str, edits: &[RewriteEdit]) -> Result<Stri
     }
 }
 
+/// Apply a collection of edits grouped by file. Returns a map from file
+/// path to the result of applying edits to that file's contents.
 pub fn apply_edits_to_files(all_edits: &[RewriteEdit]) -> HashMap<PathBuf, Result<String, String>> {
     let mut map: HashMap<PathBuf, Vec<RewriteEdit>> = HashMap::new();
     for e in all_edits {
@@ -127,6 +150,8 @@ pub fn apply_edits_to_files(all_edits: &[RewriteEdit]) -> HashMap<PathBuf, Resul
     out
 }
 
+/// Generate a unified diff between `original` and `rewritten` for `path`.
+#[must_use]
 pub fn generate_diff(original: &str, rewritten: &str, path: &Path) -> String {
     if original == rewritten {
         return String::new();
@@ -140,6 +165,8 @@ pub fn generate_diff(original: &str, rewritten: &str, path: &Path) -> String {
     unified
 }
 
+/// Write `content` to `path` using a temporary file and rename for
+/// atomicity.
 pub fn write_atomically(path: &Path, content: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, content)?;

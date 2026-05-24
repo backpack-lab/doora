@@ -1,5 +1,11 @@
 #![allow(dead_code)]
 
+//! Query-to-Bloom-filter sifting utilities.
+//!
+//! This module extracts literal strings from query sources, converts them to
+//! trigram sets, and decides whether a file's Bloom filter indicates it is a
+//! candidate for full parsing.
+
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fs::Metadata;
@@ -9,23 +15,34 @@ use crate::bloom::{BloomFilter, BLOOM_BYTES};
 use crate::index::IndexManifest;
 use crate::trigram::extract_query_trigrams;
 
+/// Trigram sets derived from each query and whether any query contained literals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryTrigramSet {
+    /// Per-query list of unique trigrams extracted from literal predicates.
     pub per_query_trigrams: Vec<Vec<[u8; 3]>>,
+    /// True when at least one query included a literal that produced trigrams.
     pub has_literals: bool,
 }
 
+/// File index status relative to an `IndexManifest`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileIndexStatus {
+    /// No index entry exists for the file.
     NotIndexed,
+    /// The file has a fresh index entry and includes a recovered Bloom filter.
     Fresh(BloomFilter),
+    /// The index entry exists but is stale (mtime/size mismatch or corrupt bits).
     Stale,
 }
 
+/// Extract literal strings from multiple query sources.
+#[must_use]
 pub fn extract_literal_strings_from_queries(query_sources: &[String]) -> Vec<String> {
     query_sources.iter().flat_map(|query| extract_literal_strings_from_query(query)).collect()
 }
 
+/// Build a `QueryTrigramSet` for the provided query sources.
+#[must_use]
 pub fn build_query_trigram_set(query_sources: &[String]) -> QueryTrigramSet {
     let mut per_query_trigrams: Vec<Vec<[u8; 3]>> = Vec::with_capacity(query_sources.len());
 
@@ -47,6 +64,10 @@ pub fn build_query_trigram_set(query_sources: &[String]) -> QueryTrigramSet {
     QueryTrigramSet { per_query_trigrams, has_literals: true }
 }
 
+/// Return whether a file should be parsed based on its `filter` and the
+/// `trigram_set` derived from queries.
+///
+/// If `trigram_set.has_literals` is false this function always returns `true`.
 pub fn should_parse_file(filter: &BloomFilter, trigram_set: &QueryTrigramSet) -> bool {
     if !trigram_set.has_literals {
         return true;
@@ -64,6 +85,8 @@ pub fn should_parse_file(filter: &BloomFilter, trigram_set: &QueryTrigramSet) ->
     false
 }
 
+/// Determine the index status of `path` using `manifest` and `metadata`.
+#[must_use]
 pub fn get_file_index_status(
     manifest: &IndexManifest,
     path: &Path,

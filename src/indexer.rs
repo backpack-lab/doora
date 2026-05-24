@@ -12,6 +12,11 @@
     clippy::unnecessary_wraps
 )]
 
+//! Index construction logic.
+//!
+//! `build_index` walks a repository, constructs per-file Bloom filters and
+//! optional in-memory SQLite state, and writes an on-disk index manifest.
+
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::fs;
@@ -30,6 +35,17 @@ use crate::trigram::extract_unique_trigrams_from_bytes;
 use crate::types::{LangMode, Language, Result};
 use crate::walker::{build_auto_walker, build_walker};
 
+/// Build or update the on-disk index for `root`.
+///
+/// Walks source files according to `lang_mode`, computes per-file Bloom
+/// filters, extracts symbols when `persist` is true, and writes an
+/// `IndexManifest` to disk. When `persist` is true a SQLite `MemoryDb` is
+/// also maintained for fast lookups.
+///
+/// # Errors
+///
+/// Returns an `AppError` variant when filesystem, parsing, or database
+/// operations fail.
 pub fn build_index(root: &Path, lang_mode: &LangMode, verbose: bool, persist: bool) -> Result<()> {
     let root_abs = match fs::canonicalize(root) {
         Ok(p) => p,

@@ -1,5 +1,11 @@
 #![allow(clippy::module_name_repetitions, dead_code)]
 
+//! Parsing utilities and helpers for `ast-search`.
+//!
+//! This module exposes functions to detect file language, parse files using
+//! Tree-sitter, and utilities for returning either heap-backed or memory-mapped
+//! file sources.
+
 use crate::types::{AppError, Language, Result};
 use std::cell::RefCell;
 use std::path::Path;
@@ -13,14 +19,26 @@ thread_local! {
     static PARSER: RefCell<Parser> = RefCell::new(create_parser());
 }
 
+/// Source container for parsed file contents.
+///
+/// `FileSource` represents the in-memory backing for a parsed file. `Heap` is
+/// used for smaller files and stores the contents in a `String`. `Mapped` uses
+/// an OS memory map (`mmap`) for large files to avoid copying.
 #[derive(Debug)]
 pub enum FileSource {
+    /// Heap-allocated UTF-8 contents of the file.
     Heap(String),
+    /// Memory-mapped file contents. The bytes are accessible via `as_ref()`.
     Mapped(memmap2::Mmap),
 }
 
 impl FileSource {
     #[allow(dead_code)]
+    /// Return the file contents as a byte slice.
+    ///
+    /// The returned slice points into either the heap `String` or the memory
+    /// mapped region; callers must not assume the slice outlives the
+    /// `FileSource` value.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         match self {
@@ -30,6 +48,9 @@ impl FileSource {
     }
 
     #[allow(dead_code)]
+    /// Return the file contents as `&str` if they are valid UTF-8.
+    ///
+    /// Returns `None` for non-UTF-8 memory-mapped files.
     #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -46,6 +67,13 @@ impl AsRef<[u8]> for FileSource {
 }
 
 #[allow(clippy::missing_errors_doc, dead_code)]
+/// Resolve a short language name to a Tree-sitter `Language`.
+///
+/// # Errors
+///
+/// Returns [AppError::LanguageNotSupported] if `lang` is not one of the
+/// supported language identifiers (for example `rust`, `python`, `js`, `ts`,
+/// `go`, `c`, `cpp`).
 pub fn get_language(lang: &str) -> Result<TsLanguage> {
     match lang {
         "rust" => Ok(tree_sitter_rust::language()),
@@ -61,9 +89,19 @@ pub fn get_language(lang: &str) -> Result<TsLanguage> {
     }
 }
 
+/// File size threshold (in bytes) above which files will be memory-mapped
+/// instead of read into heap memory.
 pub const MMAP_THRESHOLD_BYTES: u64 = 1_024 * 1_024;
 
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+/// Parse `path` using the provided `language`, selecting a heap or mmap
+/// backing based on `threshold`.
+///
+/// # Errors
+///
+/// Returns [AppError::IoError] for filesystem or mmap failures and
+/// [AppError::ParseError] when the file is empty or Tree-sitter fails to
+/// produce a parse tree.
 pub fn parse_file_with_threshold(
     path: &Path,
     language: &tree_sitter::Language,
@@ -74,6 +112,9 @@ pub fn parse_file_with_threshold(
 }
 
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+/// Parse a file given its `metadata`, using the configured mmap threshold.
+///
+/// See `parse_file_with_threshold` for error semantics.
 pub fn parse_file_with_metadata(
     path: &Path,
     language: &tree_sitter::Language,
@@ -131,12 +172,20 @@ fn parse_file_with_metadata_and_threshold(
     Ok((tree, source))
 }
 
-#[must_use = "The returned Tree and FileSource must be dropped immediately after query execution. Holding them accumulates unbounded RAM."]
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+/// Parse a file using the default mmap threshold (`MMAP_THRESHOLD_BYTES`).
+///
+/// # Errors
+///
+/// Returns [AppError::IoError] or [AppError::ParseError] on failure.
+#[must_use = "The returned Tree and FileSource must be dropped immediately after query execution. Holding them accumulates unbounded RAM."]
 pub fn parse_file(path: &Path, language: &tree_sitter::Language) -> Result<(Tree, FileSource)> {
     parse_file_with_threshold(path, language, MMAP_THRESHOLD_BYTES)
 }
 
+/// Detect the language of `path` from its filename extension.
+///
+/// Returns `None` when the extension is unknown.
 #[must_use]
 pub fn detect_language(path: &Path) -> Option<Language> {
     let ext = path.extension().and_then(|e| e.to_str())?.to_lowercase();
@@ -153,6 +202,8 @@ pub fn detect_language(path: &Path) -> Option<Language> {
     }
 }
 
+/// Return the list of supported `Language` variants and their Tree-sitter
+/// `Language` values.
 #[must_use]
 pub fn get_all_languages() -> Vec<(Language, TsLanguage)> {
     vec![

@@ -1,3 +1,9 @@
+//! Query compilation and match extraction utilities.
+//!
+//! This module compiles S-expression queries for Tree-sitter, caches
+//! per-pattern `kind_id` information for fast pre-filtering, and extracts
+//! `MatchResult` instances from a parsed `Tree`.
+
 use std::{collections::HashSet, path::Path, sync::Arc};
 
 use regex::Regex;
@@ -5,26 +11,47 @@ use tree_sitter::{Node, Query, QueryCursor, Tree};
 
 use crate::types::{AppError, MatchResult, Result};
 
+/// A compiled `#match?` predicate extracted from a query pattern.
+///
+/// Holds the index of the pattern within a query, the capture index to which
+/// the predicate applies, and the compiled `Regex` used for filtering.
 #[derive(Debug, Clone)]
 pub struct RegexPredicate {
+    /// Index of the pattern within the original query source.
     pub pattern_index: usize,
+    /// The capture index (as returned by Tree-sitter) the predicate targets.
     pub capture_index: u32,
+    /// The compiled regular expression used to validate the capture text.
     pub regex: Arc<Regex>,
 }
 
+/// A query prepared for execution.
+///
+/// `CompiledQuery` contains the parsed Tree-sitter `Query`, a precomputed set
+/// of `kind_id`s used to quickly filter matches, the language used during
+/// compilation, and any `#match?` regex predicates discovered in the source.
 #[derive(Debug)]
 pub struct CompiledQuery {
+    /// The parsed Tree-sitter query object.
     pub query: Arc<Query>,
+    /// Precomputed node kind ids referenced by the query source.
     pub kind_ids: HashSet<u16>,
     #[allow(dead_code)]
+    /// The Tree-sitter language used to compile this query.
     pub language: tree_sitter::Language,
+    /// Any `#match?` regex predicates attached to captures in the query.
     pub regex_predicates: Vec<RegexPredicate>,
 }
 
+/// A collection of compiled queries treated as a single multi-query.
+///
+/// Useful for running multiple query sources against the same parsed tree.
 #[derive(Debug)]
 pub struct MultiCompiledQuery {
+    /// The compiled queries to run.
     pub queries: Vec<Arc<CompiledQuery>>,
     #[allow(dead_code)]
+    /// The Tree-sitter language these queries target.
     pub language: tree_sitter::Language,
 }
 
@@ -158,6 +185,13 @@ fn build_regex_predicates(
 }
 
 #[allow(clippy::missing_errors_doc)]
+/// Compile a single query source into a `CompiledQuery`.
+///
+/// # Errors
+///
+/// Returns [AppError::QueryCompileError] when the query source fails to
+/// parse or when an internal predicate contains an invalid regular
+/// expression.
 pub fn compile_query(
     language: &tree_sitter::Language,
     query_source: &str,
@@ -177,6 +211,10 @@ pub fn compile_query(
 }
 
 #[allow(clippy::missing_errors_doc)]
+/// Compile multiple query sources into a `MultiCompiledQuery`.
+///
+/// Individual query compilation failures are ignored; only successfully
+/// compiled queries are included in the returned `MultiCompiledQuery`.
 pub fn compile_multi_query(
     language: &tree_sitter::Language,
     query_sources: &[String],
@@ -192,6 +230,10 @@ pub fn compile_multi_query(
     Ok(Arc::new(MultiCompiledQuery { queries, language: language.clone() }))
 }
 
+/// Extract all `MatchResult`s that satisfy any of the queries in `multi`.
+///
+/// The function applies pre-filtering by `kind_id` and evaluates any
+/// `#match?` regex predicates. Returned results are sorted and deduplicated.
 #[must_use]
 pub fn extract_multi_matches(
     tree: &tree_sitter::Tree,
@@ -280,6 +322,9 @@ pub fn extract_multi_matches(
     results
 }
 
+#[allow(dead_code)]
+/// Convenience wrapper to run a single `CompiledQuery` and return its
+/// `MatchResult`s.
 #[must_use]
 #[allow(dead_code)]
 pub fn extract_matches(

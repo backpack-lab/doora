@@ -1,27 +1,41 @@
 #![allow(dead_code)]
 
+//! Trigram extraction helpers used for Bloom filter pre-filtering and
+//! fast query preselection.
+
 use std::collections::HashSet;
 
+/// Extract every 3-byte sliding trigram from `text` in byte-order.
+///
+/// Returns an empty vector for inputs shorter than three bytes.
 #[must_use]
 pub fn extract_trigrams(text: &str) -> Vec<[u8; 3]> {
     sliding_window(text.as_bytes())
 }
 
+/// Extract every 3-byte trigram from raw `bytes`.
 #[must_use]
 pub fn extract_trigrams_from_bytes(bytes: &[u8]) -> Vec<[u8; 3]> {
     sliding_window(bytes)
 }
 
+/// Extract unique 3-byte trigrams from `text`, deduplicating repeated
+/// occurrences.
 #[must_use]
 pub fn extract_unique_trigrams(text: &str) -> Vec<[u8; 3]> {
     unique_sliding_window(text.as_bytes())
 }
 
+/// Extract unique trigrams from raw `bytes`.
 #[must_use]
 pub fn extract_unique_trigrams_from_bytes(bytes: &[u8]) -> Vec<[u8; 3]> {
     unique_sliding_window(bytes)
 }
 
+/// Extract the set of trigrams that appear in `query_literal`.
+///
+/// This is used to prefilter candidate files by checking for the presence of
+/// query trigrams in per-file Bloom filters.
 #[must_use]
 pub fn extract_query_trigrams(query_literal: &str) -> Vec<[u8; 3]> {
     unique_sliding_window(query_literal.as_bytes())

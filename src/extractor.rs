@@ -1,5 +1,11 @@
 #![allow(clippy::missing_errors_doc, clippy::must_use_candidate)]
 
+//! Language-specific symbol extraction using Tree-sitter queries.
+//!
+//! `SymbolExtractor` runs a small set of language queries to discover
+//! top-level symbols (functions, types, imports) and converts them into
+//! `NewSymbolRow` structures suitable for insertion into the memory DB.
+
 use crate::memory::{NewSymbolRow, SymbolKind};
 use crate::parser::FileSource;
 use crate::types::Language;
@@ -8,10 +14,14 @@ use tree_sitter::{Language as TsLanguage, Node, Query, QueryCursor, Tree};
 
 #[derive(Debug, Clone)]
 pub struct SymbolExtractor {
+    /// The language to extract symbols for.
     pub language: Language,
 }
 
 impl SymbolExtractor {
+    /// Extract symbols from `tree` and `source` and associate them with `file_id`.
+    ///
+    /// Returns a vector of `NewSymbolRow` describing the discovered symbols.
     pub fn extract(&self, tree: &Tree, source: &FileSource, file_id: i64) -> Vec<NewSymbolRow> {
         let queries = queries_for_language(&self.language);
         let ts_language = ts_language_for(&self.language);

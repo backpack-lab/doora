@@ -1,5 +1,11 @@
 #![allow(dead_code)]
 
+//! On-disk index file format and helpers.
+//!
+//! This module defines the `IndexEntry` and `IndexManifest` structures used to
+//! persist per-file metadata and Bloom filters, and provides helpers to save
+//! and load the index atomically.
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,28 +16,42 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{AppError, Result};
 
+/// Filename used to store the index in a repository root.
 pub const INDEX_FILENAME: &str = ".doora-index";
 
+/// Current on-disk index format version.
 pub const INDEX_FORMAT_VERSION: u32 = 1;
 
+/// Metadata and Bloom filter for a single file recorded in the index.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct IndexEntry {
+    /// Path to the file relative to the index root.
     pub path: PathBuf,
+    /// Last-modified time in seconds since the UNIX epoch used for staleness checks.
     pub mtime_secs: u64,
+    /// Size of the file in bytes at indexing time.
     pub file_size_bytes: u64,
+    /// Serialized Bloom filter bits for the file.
     pub bloom_bits: Vec<u8>,
+    /// Language identifier used when the file was indexed (for example "rust").
     pub language: String,
 }
 
+/// The top-level manifest stored in the index file.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct IndexManifest {
+    /// Format version of the manifest.
     pub version: u32,
+    /// Index creation time in seconds since the UNIX epoch.
     pub indexed_at_secs: u64,
+    /// Root directory the index covers.
     pub root_path: PathBuf,
+    /// Per-file entries recorded in the manifest.
     pub entries: Vec<IndexEntry>,
 }
 
 impl IndexManifest {
+    /// Create a new empty `IndexManifest` for `root_path`.
     #[must_use]
     pub fn new(root_path: PathBuf) -> Self {
         IndexManifest {
@@ -42,11 +62,15 @@ impl IndexManifest {
         }
     }
 
+    /// Find an entry for `path` if present.
     #[must_use]
     pub fn find_entry(&self, path: &Path) -> Option<&IndexEntry> {
         self.entries.iter().find(|e| e.path == path)
     }
 
+    /// Insert or replace an `IndexEntry` in the manifest.
+    ///
+    /// If an entry for the same path already exists it is replaced.
     pub fn upsert_entry(&mut self, entry: IndexEntry) {
         if let Some(pos) = self.entries.iter().position(|e| e.path == entry.path) {
             self.entries[pos] = entry;
@@ -55,11 +79,20 @@ impl IndexManifest {
         }
     }
 
+    /// Remove entries whose paths are not present in `current_paths`.
     pub fn remove_stale_entries(&mut self, current_paths: &HashSet<PathBuf>) {
         self.entries.retain(|e| current_paths.contains(&e.path));
     }
 }
 
+#[allow(clippy::missing_errors_doc)]
+/// Persist `manifest` to `index_path` atomically using a temporary file and
+/// rename.
+///
+/// # Errors
+///
+/// Returns [AppError::IndexCorrupt] when serialization fails and
+/// [AppError::IoError] for filesystem errors.
 #[allow(clippy::missing_errors_doc)]
 pub fn save_index(manifest: &IndexManifest, index_path: &Path) -> Result<()> {
     let encoded = bincode::serde::encode_to_vec(manifest, bincode::config::standard())
@@ -83,6 +116,15 @@ pub fn save_index(manifest: &IndexManifest, index_path: &Path) -> Result<()> {
 }
 
 #[allow(clippy::missing_errors_doc)]
+/// Load an `IndexManifest` from `index_path` validating the format version.
+///
+/// # Errors
+///
+/// Returns [AppError::IoError] when the file cannot be read and
+/// [AppError::IndexCorrupt] when deserialization fails. Returns
+/// [AppError::IndexVersionMismatch] when the on-disk version differs from
+/// `INDEX_FORMAT_VERSION`.
+#[allow(clippy::missing_errors_doc)]
 pub fn load_index(index_path: &Path) -> Result<IndexManifest> {
     let bytes = fs::read(index_path)?;
     let (manifest, _) =
@@ -97,11 +139,13 @@ pub fn load_index(index_path: &Path) -> Result<IndexManifest> {
     Ok(manifest)
 }
 
+/// Return the expected index file path for `root`.
 #[must_use]
 pub fn index_path_for_root(root: &Path) -> PathBuf {
     root.join(INDEX_FILENAME)
 }
 
+/// Returns true when an index file exists for `root`.
 #[must_use]
 pub fn index_exists(root: &Path) -> bool {
     index_path_for_root(root).exists()

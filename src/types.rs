@@ -1,74 +1,133 @@
+//! Types and crate-wide result and error definitions used across the
+//! `ast-search` pipeline.
+//!
+//! This module defines common enums, structs and the `Result<T>` alias that
+//! higher-level modules use to communicate errors and match results.
+
 use std::path::PathBuf;
 
 use thiserror::Error;
 
+/// A programming language supported by `ast-search`.
+///
+/// Used to select the appropriate Tree-sitter grammar and parsing mode.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Language {
+    /// The Rust programming language.
     Rust,
+    /// The Python programming language.
     Python,
+    /// JavaScript.
     JavaScript,
+    /// TypeScript.
     TypeScript,
+    /// The Go programming language.
     Go,
+    /// The C programming language.
     C,
+    /// C++ (C plus plus).
     Cpp,
 }
 
+/// Mode controlling how language selection is performed for a search.
+///
+/// `Single` pins the search to a single `Language`. `Auto` lets the parser
+/// attempt to detect the language from file content or file extension.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LangMode {
+    /// Use a specific language for the entire search.
     Single(Language),
+    /// Automatically detect a language per-file.
     Auto,
 }
 
+/// A single structural match result from the search pipeline.
+///
+/// Contains the file location, byte and line/column ranges, and the
+/// capture name and matched text for the hit.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MatchResult {
+    /// Path to the file containing the match.
     pub file_path: PathBuf,
+    /// 0-based start line of the match.
     pub start_line: usize,
+    /// 0-based start column of the match.
     pub start_col: usize,
+    /// 0-based end line of the match.
     pub end_line: usize,
+    /// 0-based end column of the match.
     pub end_col: usize,
+    /// Byte offset of the start of the match within the file.
     pub start_byte: usize,
+    /// Byte offset of the end of the match within the file.
     pub end_byte: usize,
+    /// The capture name as defined in the query (for example `fn.name`).
     pub capture_name: String,
+    /// The textual content that was matched.
     pub matched_text: String,
 }
 
+/// Configuration options controlling a search run.
+///
+/// Contains the query strings, the root path to search under, and the
+/// language selection mode.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchConfig {
+    /// One or more S-expression query strings to execute.
     pub queries: Vec<String>,
+    /// Root directory to search under.
     pub root_path: PathBuf,
+    /// How to select a language for files under `root_path`.
     pub lang_mode: LangMode,
 }
 
+/// Crate-level error type returned by public APIs.
+///
+/// Variants describe specific failure conditions callers may encounter.
 #[derive(Debug, Error)]
 pub enum AppError {
+    /// An underlying I/O error occurred while reading or writing files.
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
 
-    #[error("Directory walk error: {0}")]
+    /// An error from the filesystem walker (for example permission denied).
+    #[error("Walk error: {0}")]
     WalkError(#[from] ignore::Error),
 
+    /// The file could not be parsed or the parsed AST did not contain the
+    /// expected nodes.
     #[error("Parse error: {0}")]
     ParseError(String),
 
+    /// Query compilation failed due to an invalid or unsupported pattern.
     #[error("Failed to compile query: {0}")]
     QueryCompileError(String),
 
+    /// The requested language is not supported by the current build.
     #[error("Language not supported: {0}")]
     LanguageNotSupported(String),
-    #[error("database error: {0}")]
+
+    /// A database-related error (for example SQLite errors surfaced as strings).
+    #[error("Database error: {0}")]
     DbError(String),
-    #[error("index file is corrupt or unreadable: {0}")]
+
+    /// The on-disk index file is corrupt or could not be deserialized.
+    #[error("Index corrupt: {0}")]
     IndexCorrupt(String),
 
-    #[error("index version mismatch: found {found}, expected {expected}")]
+    /// The index file version does not match the expected on-disk format.
+    #[error("Index version mismatch: found {found}, expected {expected}")]
     IndexVersionMismatch { found: u32, expected: u32 },
 
-    #[error("index root mismatch: index was built for {index_root}, searching {search_root}")]
+    /// The index was built for a different root directory than the one being
+    /// searched; callers should rebuild the index for the correct root.
+    #[error("Index root mismatch: index root {index_root}, search root {search_root}")]
     IndexRootMismatch { index_root: PathBuf, search_root: PathBuf },
 }
 
+/// Crate-wide result type. Equivalent to `std::result::Result<T, AppError>`.
 pub type Result<T> = std::result::Result<T, AppError>;
 
 #[cfg(test)]

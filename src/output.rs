@@ -1,3 +1,8 @@
+//! Formatting and terminal output helpers for search and lookup results.
+//!
+//! This module exposes `print_match`, `print_summary`, and related helpers
+//! which format `MatchResult` items and lookup rows for human consumption.
+
 use crate::memory::{FileRow, SymbolRow};
 use crate::types::MatchResult;
 use std::io::Write;

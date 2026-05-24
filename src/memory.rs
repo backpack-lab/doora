@@ -1,5 +1,10 @@
 #![allow(clippy::missing_errors_doc, clippy::must_use_candidate)]
 
+//! In-memory and on-disk symbol storage backed by SQLite.
+//!
+//! `MemoryDb` manages a small SQLite database used to store file and symbol
+//! metadata for fast lookup and name-based queries.
+
 use crate::types::{AppError, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -9,27 +14,43 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Filename used for the optional on-disk memory DB in a repository root.
 pub const MEMORY_DB_FILENAME: &str = ".ast-search-memory.db";
 
+/// Compute the path to the memory DB file for `root`.
 #[must_use]
 pub fn memory_db_path(root: &Path) -> PathBuf {
     root.join(MEMORY_DB_FILENAME)
 }
 
+/// Kinds of symbols recorded in the `MemoryDb`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymbolKind {
+    /// Free-standing function.
     Function,
+    /// Method defined on an impl or class.
     Method,
+    /// Struct type.
     Struct,
+    /// Enum type.
     Enum,
+    /// Trait declaration.
     Trait,
+    /// Interface (language dependent).
     Interface,
+    /// Type alias.
     TypeAlias,
+    /// Constant value.
     Constant,
+    /// Local or global variable.
     Variable,
+    /// Class (language dependent).
     Class,
+    /// Module or package.
     Module,
+    /// Import or use statement.
     Import,
+    /// Unknown or unclassified symbol kind.
     Unknown,
 }
 
@@ -75,28 +96,45 @@ impl FromStr for SymbolKind {
     }
 }
 
+/// Persistent representation of a file stored in the `MemoryDb`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileRow {
+    /// Row id in the `files` table.
     pub id: i64,
+    /// File path as stored in the DB.
     pub path: String,
+    /// Last-modified timestamp recorded when indexed.
     pub mtime: i64,
+    /// Language identifier recorded for the file.
     pub language: String,
+    /// Indexing timestamp.
     pub indexed_at: i64,
 }
 
+/// Persistent representation of a symbol stored in the `MemoryDb`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SymbolRow {
+    /// Row id in the `symbols` table.
     pub id: i64,
+    /// Associated file row id.
     pub file_id: i64,
+    /// Symbol kind, e.g. function, struct.
     pub kind: SymbolKind,
+    /// Symbol name.
     pub name: String,
+    /// 0-based start line.
     pub start_line: usize,
+    /// 0-based start column.
     pub start_col: usize,
+    /// 0-based end line.
     pub end_line: usize,
+    /// 0-based end column.
     pub end_col: usize,
+    /// Optional signature or prototype string for display.
     pub signature: Option<String>,
 }
 
+/// Structure used to insert or update a file row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewFileRow {
     pub path: String,
@@ -104,6 +142,7 @@ pub struct NewFileRow {
     pub language: String,
 }
 
+/// Structure used to insert a new symbol into the DB.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewSymbolRow {
     pub file_id: i64,
@@ -116,6 +155,7 @@ pub struct NewSymbolRow {
     pub signature: Option<String>,
 }
 
+/// Small wrapper around a `rusqlite::Connection` implementing DB helpers.
 pub struct MemoryDb {
     conn: Connection,
 }
@@ -127,14 +167,16 @@ impl MemoryDb {
         db.initialize_schema()?;
         Ok(db)
     }
-
+    /// Open or create a database at `db_path` and initialize schema if
+    /// necessary.
+    #[allow(dead_code)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(db_error)?;
         let db = Self { conn };
         db.initialize_schema()?;
         Ok(db)
     }
-
+    /// Initialize the required schema (tables and indices).
     fn initialize_schema(&self) -> Result<()> {
         self.conn
             .execute_batch(
@@ -143,6 +185,7 @@ impl MemoryDb {
             .map_err(db_error)
     }
 
+    /// Insert or replace a file row and return the row id.
     pub fn upsert_file(&self, row: &NewFileRow) -> Result<i64> {
         let indexed_at = unix_seconds_now()?;
         self.conn
@@ -154,6 +197,7 @@ impl MemoryDb {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Lookup a `FileRow` by its path.
     pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileRow>> {
         self.conn
             .query_row(
@@ -173,6 +217,7 @@ impl MemoryDb {
             .map_err(db_error)
     }
 
+    /// Lookup a `FileRow` by its numeric id.
     pub fn get_file_by_id(&self, id: i64) -> Result<Option<FileRow>> {
         self.conn
             .query_row(
@@ -192,10 +237,12 @@ impl MemoryDb {
             .map_err(db_error)
     }
 
+    /// Delete a file row (and cascade delete its symbols) by path.
     pub fn delete_file_by_path(&self, path: &str) -> Result<usize> {
         self.conn.execute("DELETE FROM files WHERE path = ?1", params![path]).map_err(db_error)
     }
 
+    /// List all files stored in the DB, ordered by path.
     pub fn list_files(&self) -> Result<Vec<FileRow>> {
         let mut stmt = self
             .conn
@@ -215,6 +262,7 @@ impl MemoryDb {
         collect_rows(rows)
     }
 
+    /// Return the number of files currently indexed in the DB.
     pub fn file_count(&self) -> Result<usize> {
         let count: i64 = self
             .conn
@@ -223,6 +271,7 @@ impl MemoryDb {
         i64_to_usize(count)
     }
 
+    /// Insert a single symbol row and return its id.
     pub fn insert_symbol(&self, row: &NewSymbolRow) -> Result<i64> {
         self.conn
             .execute(
@@ -242,6 +291,10 @@ impl MemoryDb {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Insert a batch of symbol rows inside an explicit transaction.
+    ///
+    /// This method guarantees an all-or-nothing insertion: if any insert
+    /// fails the transaction is rolled back and an error is returned.
     pub fn insert_symbols_batch(&self, rows: &[NewSymbolRow]) -> Result<usize> {
         self.conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;").map_err(db_error)?;
         let mut inserted = 0usize;
@@ -274,6 +327,7 @@ impl MemoryDb {
         result
     }
 
+    /// Return the symbols for `file_id` ordered by position.
     pub fn get_symbols_for_file(&self, file_id: i64) -> Result<Vec<SymbolRow>> {
         self.query_symbols(
             "SELECT id, file_id, kind, name, start_line, start_col, end_line, end_col, signature FROM symbols WHERE file_id = ?1 ORDER BY start_line ASC, start_col ASC",
@@ -281,6 +335,7 @@ impl MemoryDb {
         )
     }
 
+    /// Find symbols whose name equals `name`.
     pub fn find_symbols_by_name(&self, name: &str) -> Result<Vec<SymbolRow>> {
         self.query_symbols(
             "SELECT id, file_id, kind, name, start_line, start_col, end_line, end_col, signature FROM symbols WHERE name = ?1 ORDER BY file_id ASC, start_line ASC, start_col ASC",
@@ -288,6 +343,9 @@ impl MemoryDb {
         )
     }
 
+    /// Find symbols with names starting with `prefix`.
+    ///
+    /// Results are limited to 100 rows to bound memory and response size.
     pub fn find_symbols_by_name_prefix(&self, prefix: &str) -> Result<Vec<SymbolRow>> {
         let pattern = format!("{prefix}%");
         self.query_symbols(
@@ -296,6 +354,7 @@ impl MemoryDb {
         )
     }
 
+    /// Find symbols whose name contains `needle`.
     pub fn find_symbols_by_name_contains(&self, needle: &str) -> Result<Vec<SymbolRow>> {
         let pattern = format!("%{needle}%");
         self.query_symbols(
@@ -304,6 +363,7 @@ impl MemoryDb {
         )
     }
 
+    /// Find symbols matching `kind`.
     pub fn find_symbols_by_kind(&self, kind: &SymbolKind) -> Result<Vec<SymbolRow>> {
         self.query_symbols(
             "SELECT id, file_id, kind, name, start_line, start_col, end_line, end_col, signature FROM symbols WHERE kind = ?1 ORDER BY name ASC, file_id ASC",
@@ -311,6 +371,7 @@ impl MemoryDb {
         )
     }
 
+    /// Find symbols with exact `name` and the given `kind`.
     pub fn find_symbols_by_name_and_kind(
         &self,
         name: &str,
@@ -322,12 +383,14 @@ impl MemoryDb {
         )
     }
 
+    /// Delete all symbols associated with `file_id`.
     pub fn delete_symbols_for_file(&self, file_id: i64) -> Result<usize> {
         self.conn
             .execute("DELETE FROM symbols WHERE file_id = ?1", params![file_id])
             .map_err(db_error)
     }
 
+    /// Return the total number of symbols stored in the DB.
     pub fn symbol_count(&self) -> Result<usize> {
         let count: i64 = self
             .conn

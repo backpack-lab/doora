@@ -1,3 +1,9 @@
+//! Terminal user interface for interactive searching and browsing results.
+//!
+//! `run_tui` launches a blocking TUI that runs a Tokio runtime internally
+//! to manage input, background parsing and search tasks. The function
+//! restores the terminal state on exit (including on panic) and attempts to
+//! leave the terminal usable for the caller.
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
 use ratatui::{
     backend::CrosstermBackend,
@@ -426,6 +432,15 @@ pub(crate) enum SearchCommand {
     Cancel,
 }
 
+/// Run the terminal user interface.
+///
+/// This function is blocking: it creates and uses a Tokio `Runtime` internally
+/// to drive async input handling and background search/indexing tasks, then
+/// blocks until the TUI session exits. The function ensures the terminal
+/// state (alternate screen, raw mode, mouse capture) is restored on return —
+/// it attempts to restore the terminal even if an error occurs while running
+/// the UI. Errors returned are application-level `AppError` variants wrapped
+/// in the crate `Result` type.
 pub fn run_tui(
     config: &crate::types::SearchConfig,
     compiled_queries: &std::sync::Arc<
