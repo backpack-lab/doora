@@ -87,7 +87,7 @@ fn handle_file_error(error: &FileError, skip_count: &Mutex<usize>) {
                   Queries use Tree-sitter S-expression syntax:\n\
                   \n  \
                   doora -q '(function_item name: (identifier) @fn)' -p ./src\n\n\
-                  See https://github.com/your-org/doora for full documentation."
+                  See https://github.com/backpack-lab/doora for full documentation."
 )]
 struct App {
     #[command(flatten)]
