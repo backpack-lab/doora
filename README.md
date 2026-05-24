@@ -145,7 +145,6 @@ doora --generate-completions fish > ~/.config/fish/completions/doora.fish
 
 ## Quick Start
 
-**Looking for how to write queries?** Check out our detailed [Query Guide](QUERY_GUIDE.md).
 
 ```bash
 # Find all Rust function definitions in ./src
@@ -357,6 +356,8 @@ See [MCP Server for AI Agents](#mcp-server-for-ai-agents) for full setup instruc
 ## Query Syntax Guide
 
 `doora` uses Tree-sitter's S-expression pattern syntax. An S-expression is a Lisp-like notation that mirrors the shape of the syntax tree.
+
+**Looking for how to write queries?** Check out our detailed [Query Guide](QUERY_GUIDE.md).
 
 ### Basics
 
