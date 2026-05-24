@@ -3,7 +3,7 @@
 **Search code the way compilers see it — not the way text editors do.**
 
 [![crates.io](https://img.shields.io/badge/crates.io-v0.1.0-orange?style=flat-square)](https://crates.io/crates/doora)
-[![license](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](./LICENSE)
+[![license](https://img.shields.io/badge/license-Apache-blue?style=flat-square)](./LICENSE)
 [![build](https://img.shields.io/badge/build-passing-brightgreen?style=flat-square)](https://github.com/backpack-lab/doora/actions)
 [![languages](https://img.shields.io/badge/languages-7-purple?style=flat-square)](#supported-languages)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-lightgrey?style=flat-square)](#installation)
